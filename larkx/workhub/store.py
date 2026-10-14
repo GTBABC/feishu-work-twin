@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import hashlib
 import time
 from datetime import datetime
 from sqlalchemy import desc, select
@@ -571,10 +572,15 @@ class HubStore:
             s.commit()
             return record(row)
 
-    def claim_send(self, request_id, chat_id, content, anchor=""):
+    def claim_send(self, request_id, chat_id, content, anchor="", target=None):
+        key = "send_target:" + hashlib.sha256(request_id.encode()).hexdigest()
+        target = target or {}
         with self.storage.Session() as s:
             existing = s.query(Action).filter_by(request_id=request_id).first()
             if existing:
+                stored = s.get(Setting, key)
+                if (json.loads(stored.value) if stored else {}) != target:
+                    raise ValueError("该请求 ID 已用于不同的回复对象")
                 if (existing.chat_id, existing.content, existing.anchor) != (
                     str(chat_id),
                     content,
@@ -586,6 +592,8 @@ class HubStore:
                 request_id=request_id, chat_id=chat_id, content=content, anchor=anchor
             )
             s.add(row)
+            if target:
+                s.add(Setting(key=key, value=json.dumps(target)))
             s.commit()
             return record(row), True
 

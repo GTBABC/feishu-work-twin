@@ -20,6 +20,8 @@ class SendBody(BaseModel):
     content: str = Field(min_length=1, max_length=12000)
     request_id: str = Field(min_length=1, max_length=100)
     anchor: str = Field(default="", max_length=40)
+    reply_to_message_id: str = Field(default="", max_length=40)
+    mention_user_id: str = Field(default="", max_length=40)
 
 
 class ControlBody(BaseModel):
@@ -183,7 +185,13 @@ def create_app(runtime=None, start_bridge=True):
     @app.post("/api/conversations/{chat_id}/send")
     async def send(chat_id: str, body: SendBody, request: Request):
         return await hub(request).send(
-            chat_id, body.content, body.request_id, body.anchor, manual=True
+            chat_id,
+            body.content,
+            body.request_id,
+            body.anchor,
+            manual=True,
+            reply_to_message_id=body.reply_to_message_id,
+            mention_user_id=body.mention_user_id,
         )
 
     @app.post("/api/conversations/{chat_id}/send-rich")

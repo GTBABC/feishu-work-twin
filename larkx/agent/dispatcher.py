@@ -22,7 +22,7 @@ def _ts(msg: dict) -> str:
 
 
 def build_xml_message(m: dict) -> str:
-    lines = ["<message>"]
+    lines = [f'<message id={quoteattr(str(m.get("msg_id") or ""))}>']
     lines.append(
         f"  <chat id={quoteattr(str(m.get('chat_id')))} name={quoteattr(str(m.get('_chat_name') or ''))} type={quoteattr(str(m.get('chat_type_name') or ''))} anchor={quoteattr(str(m.get('anchor') or ''))}/>"
     )

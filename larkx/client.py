@@ -182,7 +182,7 @@ class LarkClient:
             raise ValueError('图片上传失败')
         return body['file']['file_key']
 
-    def send_rich(self, parts, chat_id, root_id=None):
+    def send_rich(self, parts, chat_id, root_id=None, reply_to_id=None, reply_root_id=None):
         from .proto.gateway import resolve_type
         from .proto.ids import generate_request_cid
         req = resolve_type('messages.PutMessageRequest')(type=P.POST, chatId=str(chat_id),
@@ -191,6 +191,11 @@ class LarkClient:
         if root_id:
             req.rootId = str(root_id); req.parentId = str(root_id)
             if not self.is_thread_chat(chat_id):req.isReplyInThread = True
+        if reply_to_id:
+            req.parentId = str(reply_to_id)
+            if not root_id:
+                req.rootId = str(reply_root_id or reply_to_id)
+                req.isReplyInThread = False
         text = ''.join(p.get('text','') for p in parts)
         req.content.text = text; req.content.richText.innerText = text
         for part in parts:
@@ -198,6 +203,10 @@ class LarkClient:
             element = req.content.richText.elements.dictionary[eid]
             if part['type'] == 'text':
                 element.tag = 1; element.property = P.TextProperty(content=part['text']).SerializeToString()
+            elif part['type'] == 'mention':
+                element.tag = 5
+                element.property = P.AtProperty(userId=part['user_id'], content=part['text']).SerializeToString()
+                req.atUserIdList.append(int(part['user_id']))
             else:
                 key = part['key']; element.tag = 2
                 prop = resolve_type('entities.RichTextElement.ImageProperty')(token=key,originKey=key,
@@ -286,7 +295,8 @@ class LarkClient:
             chat_type = decoders.enum_to_int(v.get('chatType', 0))
             summary, data = decoders.decode_message_content(message_type, v.get('content', b''))
             root_id = v.get('rootId') or ''
-            scope, anchor = decoders.resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '', thread_chat)
+            scope, anchor = decoders.resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '', thread_chat,
+                thread_message_type=decoders.enum_to_int(v.get('threadMessageType', 0)))
             msg = {'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': decoders.MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId') or str(chat_id), 'chat_type': chat_type, 'chat_type_name': decoders.CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': False, 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position') or int(pos_key), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data}
             out.append(msg)
             if save_storage is not None:

@@ -136,7 +136,16 @@ class HubRuntime:
             send_reply=False,
         )
 
-    async def send(self, chat_id, content, request_id=None, anchor="", manual=False):
+    async def send(
+        self,
+        chat_id,
+        content,
+        request_id=None,
+        anchor="",
+        manual=False,
+        reply_to_message_id="",
+        mention_user_id="",
+    ):
         chat_id = str(chat_id)
         suffix = self.hub.setting("reply_suffix", DEFAULT_SUFFIX).strip()
         content = content.strip()
@@ -146,21 +155,104 @@ class HubRuntime:
             content += "\n\n" + suffix
         if not content.strip() or len(content) > 12000:
             raise ValueError("消息不能为空，且最多 12000 字符")
-        if chat_id not in {c["chat_id"] for c in self.hub.conversations()}:
+        conversation = next(
+            (c for c in self.hub.conversations() if c["chat_id"] == chat_id), None
+        )
+        if not conversation:
             raise ValueError("收件会话不存在，请先在飞书建立对话")
+        addressed = bool(reply_to_message_id or mention_user_id)
+        mention_name = ""
+        reply_root = ""
+        if addressed:
+            from ..storage.models import Message
+
+            if conversation["kind"] != "group":
+                raise ValueError("定向回复仅用于群聊")
+            with self.storage.Session() as session:
+                if reply_to_message_id:
+                    source = (
+                        session.query(Message)
+                        .filter_by(
+                            chat_id=chat_id,
+                            msg_id=str(reply_to_message_id),
+                            anchor=anchor,
+                        )
+                        .first()
+                    )
+                    if not source:
+                        raise ValueError("引用消息不在当前群聊/话题中")
+                    reply_root = source.root_id or source.msg_id
+                if mention_user_id:
+                    if not str(mention_user_id).isdigit() or str(
+                        mention_user_id
+                    ) == str(self.client.auth.user_id if self.client else ""):
+                        raise ValueError("无效的 @用户")
+                    source = (
+                        session.query(Message)
+                        .filter_by(
+                            chat_id=chat_id,
+                            sender_id=str(mention_user_id),
+                            anchor=anchor,
+                        )
+                        .order_by(Message.id.desc())
+                        .first()
+                    )
+                    if not source:
+                        raise ValueError("@用户未在当前群聊/话题中发言")
+                    mention_name = source.sender_name or str(mention_user_id)
+            if mention_user_id:
+                content = "@" + mention_name + " " + content
+                if len(content) > 12000:
+                    raise ValueError("消息含 @与尾缀最多 12000 字符")
         if not self.client or self.connection != "connected":
             raise ValueError("飞书尚未连接，未发送")
         action, claimed = self.hub.claim_send(
-            request_id or str(uuid.uuid4()), chat_id, content, anchor
+            request_id or str(uuid.uuid4()),
+            chat_id,
+            content,
+            anchor,
+            target={
+                "reply_to_message_id": reply_to_message_id,
+                "mention_user_id": mention_user_id,
+            }
+            if addressed
+            else None,
         )
         if not claimed:
             return action
         if manual:
             self.hub.touch_handoff(chat_id, manual=True)
         try:
-            message_id = await asyncio.to_thread(
-                self.client.send_msg, content, chat_id, anchor or None
-            )
+            parts = []
+            if addressed:
+                prefix = "@" + mention_name + " " if mention_user_id else ""
+                if mention_user_id:
+                    parts.append(
+                        {
+                            "type": "mention",
+                            "user_id": str(mention_user_id),
+                            "text": prefix.rstrip(),
+                        }
+                    )
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": (" " if mention_user_id else "")
+                        + content[len(prefix) :],
+                    }
+                )
+                message_id = await asyncio.to_thread(
+                    self.client.send_rich,
+                    parts,
+                    chat_id,
+                    anchor or None,
+                    reply_to_message_id or None,
+                    reply_root or None,
+                )
+            else:
+                message_id = await asyncio.to_thread(
+                    self.client.send_msg, content, chat_id, anchor or None
+                )
             if not message_id:
                 result = self.hub.finish_action(
                     action["id"],
@@ -182,8 +274,15 @@ class HubRuntime:
                     "chat_id": chat_id,
                     "from_id": self.client.auth.user_id,
                     "content": content,
-                    "msg_type": 4,
-                    "msg_type_name": "TEXT",
+                    "msg_type": 2 if addressed else 4,
+                    "msg_type_name": "POST" if addressed else "TEXT",
+                    "content_data": {
+                        "_display_parts": [{"type": "text", "text": content}]
+                    }
+                    if addressed
+                    else {},
+                    "parent_id": reply_to_message_id,
+                    "root_id": anchor or reply_root if addressed else "",
                     "anchor": anchor,
                     "create_time": int(time.time()),
                 },
@@ -263,10 +362,18 @@ class HubRuntime:
                 action["id"], "uncertain", error=type(e).__name__
             )
 
-    async def reply(self, chat_id, content, anchor=None):
+    async def reply(
+        self, chat_id, content, anchor=None, reply_to_message_id="", mention_user_id=""
+    ):
         if self.hub.human_paused(chat_id):
             return None
-        result = await self.send(chat_id, content, anchor=anchor or "")
+        result = await self.send(
+            chat_id,
+            content,
+            anchor=anchor or "",
+            reply_to_message_id=reply_to_message_id,
+            mention_user_id=mention_user_id,
+        )
         if result["status"] != "sent":
             raise RuntimeError(result["error"] or "发送未确认")
         return result["message_id"]

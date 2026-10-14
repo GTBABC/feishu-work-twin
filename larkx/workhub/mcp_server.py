@@ -36,9 +36,9 @@ class HubAccess:
             self.runtime().hub.find_messages, chat_id, query, limit, before_id
         )
 
-    async def send(self, chat_id, content, request_id, anchor):
+    async def send(self, chat_id, content, request_id, anchor, **targets):
         return await self.runtime().send(
-            chat_id, content, request_id, anchor, manual=True
+            chat_id, content, request_id, anchor, manual=True, **targets
         )
 
 
@@ -110,11 +110,16 @@ class RemoteAccess:
             params["before_id"] = before_id
         return await self.request("GET", "/api/integration/messages", params=params)
 
-    async def send(self, chat_id, content, request_id, anchor):
+    async def send(self, chat_id, content, request_id, anchor, **targets):
         return await self.request(
             "POST",
             f"/api/conversations/{quote(chat_id, safe='')}/send",
-            json={"content": content, "request_id": request_id, "anchor": anchor},
+            json={
+                "content": content,
+                "request_id": request_id,
+                "anchor": anchor,
+                **targets,
+            },
         )
 
 
@@ -188,9 +193,20 @@ def create_mcp(access):
         content: Text,
         request_id: RequestId,
         anchor: Annotated[str, Field(max_length=40)] = "",
+        reply_to_message_id: Annotated[str, Field(max_length=40)] = "",
+        mention_user_id: Annotated[str, Field(max_length=40)] = "",
     ) -> dict[str, Any]:
         """以本人身份向已确认会话发送文字。仅在用户明确要求时调用。request_id 使用 UUID，重试保持不变；返回 status=sent 才表示成功。"""
-        return await checked(access.send(chat_id, content, request_id, anchor))
+        return await checked(
+            access.send(
+                chat_id,
+                content,
+                request_id,
+                anchor,
+                reply_to_message_id=reply_to_message_id,
+                mention_user_id=mention_user_id,
+            )
+        )
 
     return server
 

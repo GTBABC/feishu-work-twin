@@ -27,6 +27,8 @@ WORK_SCHEMA = obj(
         "should_reply": {"type": "boolean"},
         "reply_reason": TEXT,
         "reply": TEXT,
+        "reply_to_message_id": TEXT,
+        "mention_user_id": TEXT,
         "overview": TEXT,
         "facts": {"type": "array", "items": TEXT},
         "tasks": {"type": "array", "items": TASK_SCHEMA},
@@ -129,6 +131,13 @@ class WorkEngine:
         )
         prompt += "\n回复正文不要附签名或 Bot 尾缀，程序会在发送时统一附上。"
         prompt += (
+            "\n群聊定向回应：明确针对某条消息回答时，reply_to_message_id 填该消息的准确 msg_id；"
+            "明确与某个人对话、回答他的问题或需要提醒他时，mention_user_id 填该人的准确 sender_id。"
+            "可以同时引用和 @，但只 @实际回应的那个人；普通闲聊插话这两个字段都留空。"
+            "只能选当前会话/话题背景或本次消息中的 ID，不猜 ID，不 @自己、不 @全体。"
+            "只在群聊使用，私聊两字段都为空；reply 正文不手工拼 @姓名，程序会生成真正的 @节点。"
+        )
+        prompt += (
             "\n每条消息的 sender id / sender_id 是独立发送者身份，群里多人不等于同一个人。"
             "participants 按用户 ID 给出各自角色；sender 仅指最新消息发送者，不能把他的角色、任务、承诺或观点套给其他人。"
             "仅同一发送者的连续短句可拼接理解；不同发送者的消息按群内对话顺序联系起来，但必须保留是谁说的。"
@@ -200,6 +209,20 @@ class WorkEngine:
             result["reply"] = ""
         elif not reply or reply == "[[NO_REPLY]]":
             raise ValueError("AI 判断需要回复，但没有提供有效回复")
+        targets = {}
+        if reply and msg.get("chat_type") in (2, 3):
+            candidates = store.reply_context(msg) + list(msg.get("_batch") or [msg])
+            message_ids = {str(m.get("msg_id") or "") for m in candidates} - {""}
+            user_ids = {str(m.get("from_id") or "") for m in candidates} - {"", my_id}
+            for key, allowed in (
+                ("reply_to_message_id", message_ids),
+                ("mention_user_id", user_ids),
+            ):
+                value = result.get(key) or ""
+                if not isinstance(value, str) or (value and value not in allowed):
+                    raise ValueError("AI 选择的引用/@对象不在当前对话中")
+                if value:
+                    targets[key] = value
         store.apply_analysis(msg, result)
         # Owner can pause or switch to draft while a model call is in progress.
         for member in msg.get("_batch") or [msg]:
@@ -257,7 +280,9 @@ class WorkEngine:
             if not allowed:
                 send_reply = False
         if reply and send_reply and mode == "auto" and not paused:
-            await reply_fn(str(msg["chat_id"]), reply, msg.get("anchor") or None)
+            await reply_fn(
+                str(msg["chat_id"]), reply, msg.get("anchor") or None, **targets
+            )
         elif reply and send_reply and mode != "off" and (mode == "draft" or paused):
             store.create_task(
                 {

@@ -61,11 +61,14 @@ def resolve_scope(
     root_id: str,
     thread_id: str,
     thread_chat: bool = False,
+    thread_message_type: int | None = None,
 ) -> tuple:
     """返回 (scope, anchor):anchor 是回复时的 --root,也是 agent 的会话边界。"""
     if chat_type == 1:
         return ("chat", "")
     if root_id and root_id != "0":
+        if chat_type == 2 and not thread_chat and thread_message_type == 0:
+            return ("chat", "")
         return ("topic", thread_id or root_id)
     # 话题群的根消息本身就开启一个话题(建群等系统提示除外);普通群每条消息也带 threadId=自身 id,不能据此判断
     if (thread_chat or chat_type == 3) and msg_type != 6:
@@ -354,7 +357,12 @@ def decode_push_messages(raw: bytes):
         at_user_ids, at_all = mention_targets(data)
         root_id = v.get("rootId") or ""
         scope, anchor = resolve_scope(
-            v.get("id"), message_type, chat_type, root_id, v.get("threadId") or ""
+            v.get("id"),
+            message_type,
+            chat_type,
+            root_id,
+            v.get("threadId") or "",
+            thread_message_type=enum_to_int(v.get("threadMessageType", 0)),
         )
         out.append(
             {
