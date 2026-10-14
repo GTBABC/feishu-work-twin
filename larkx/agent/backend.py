@@ -12,6 +12,7 @@ SESSIONS_PATH = DATA_DIR / 'agent_sessions.json'
 
 class AgentBackend:
     name = 'base'
+    returns_reply = False
 
     async def run(self, session_key: str, prompt: str) -> str:
         raise NotImplementedError
@@ -102,4 +103,7 @@ def get_backend(name: str=None) -> AgentBackend:
     name = name or cfg['agent_backend']
     if name == 'claude':
         return ClaudeCodeBackend()
+    if name == 'codex':
+        from .codex_backend import CodexBackend
+        return CodexBackend()
     return NullBackend()

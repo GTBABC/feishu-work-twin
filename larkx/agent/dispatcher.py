@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime
 from xml.sax.saxutils import escape, quoteattr
 
@@ -43,19 +44,41 @@ class SessionWorker:
         while True:
             msg = await self.queue.get()
             try:
+                if self.dispatcher.backend.returns_reply:
+                    delay = float(os.environ.get('LARKX_BATCH_DELAY', '0.6'))
+                    await asyncio.sleep(max(0, min(delay, 3)))
+                    batch = [msg]
+                    while len(batch) < 6:
+                        try:
+                            batch.append(self.queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+                    if len(batch) > 1:
+                        msg = dict(batch[-1], _batch=batch)
                 await self.dispatcher.handle_message(self.session_key, msg)
             except Exception as e:
                 logger.error(f'处理消息异常 [{self.session_key}]: {e}')
+                workflow = getattr(self.dispatcher, 'workflow', None)
+                if workflow:
+                    task = workflow.runtime.hub.create_task({'title': '自动处理异常：' + (msg.get('_chat_name') or self.session_key),
+                                                            'details': str(e), 'chat_id': str(msg.get('chat_id') or ''),
+                                                            'priority': 'high'})
+                    workflow.runtime.hub.update_task(task['id'], {'status': 'needs_attention'})
 
 
 class AgentDispatcher:
-    def __init__(self, backend, reply_fn):
+    def __init__(self, backend, reply_fn, image_prepare=None, workflow=None):
         self.cfg = load_config()
         self.backend = backend
         self.reply_fn = reply_fn
+        self.image_prepare = image_prepare
+        self.workflow = workflow
         self.workers = {}
 
     def session_key_of(self, msg: dict) -> str:
+        # A work twin must not mix one contact's model history into another chat.
+        if self.workflow:
+            return f"{msg.get('chat_id')}:{msg.get('anchor') or ''}"
         scope = self.cfg['context_scope']
         if scope == 'global':
             return 'global'
@@ -95,7 +118,7 @@ class AgentDispatcher:
     async def submit(self, msg: dict, chat_name: str='', sender_name: str='', my_user_id: str=''):
         if not self.should_handle(msg, my_user_id):
             return
-        cmd, remainder = self._parse_command(msg.get('content') or '')
+        cmd, remainder = (None,None) if self.workflow else self._parse_command(msg.get('content') or '')
         key = self.session_key_of(msg)
         chat_id = str(msg['chat_id'])
         root_id = (msg.get('anchor') or '') or None
@@ -145,18 +168,45 @@ class AgentDispatcher:
                 return n
 
     async def handle_message(self, session_key: str, msg: dict):
-        body = build_xml_message(msg)
+        batch = msg.get('_batch') or [msg]
+        body = '\n'.join(build_xml_message(item) for item in batch)
+        image_paths = []
+        if self.backend.returns_reply and self.image_prepare:
+            for item in batch:
+                if item.get('msg_type') in (2,5):
+                    try:
+                        prepared = await self.image_prepare(item)
+                        image_paths.extend(prepared if isinstance(prepared,list) else [prepared])
+                    except Exception as e:
+                        logger.warning(f'图片下载失败 [{session_key}]: {type(e).__name__}')
+                        body += '\n此条图片下载失败，无法查看；请明确说明并请对方重发，不要猜测。'
         chat_id = str(msg['chat_id'])
         root_id = (msg.get('anchor') or '') or None
         reply_cmd = f'lark send {chat_id} "<回复内容>"'
+        if self.workflow:
+            await self.workflow.process(session_key, msg, body, image_paths, self.reply_fn)
+            return
         if root_id:
             reply_cmd += f' --root {root_id}'
-        rules = f'要回复就执行: {reply_cmd}\n' + OUTPUT_RULES
+        if self.backend.returns_reply:
+            rules = ('此消息已经通过自动回复触发规则，必须给出简短自然的回复正文。'
+                     '表情也要回应；无法看到表情内容时不要猜测其含义。'
+                     '不要输出 [[NO_REPLY]]，不要执行发送命令。')
+        else:
+            rules = f'要回复就执行: {reply_cmd}\n' + OUTPUT_RULES
         if self.cfg.get('system_prompt'):
             instructions = self.cfg['system_prompt'] + '\n' + rules
         else:
             instructions = INSTRUCTIONS + '\n' + rules
         prompt = body + '\n\n' + instructions
-        out = await self.backend.run(session_key, prompt, chat_id=chat_id, anchor=(msg.get('anchor') or ''))
+        kwargs = {'chat_id': chat_id, 'anchor': msg.get('anchor') or ''}
+        if self.backend.returns_reply:
+            kwargs['require_reply'] = True
+            kwargs['image_paths'] = image_paths
+        out = await self.backend.run(session_key, prompt, **kwargs)
         if out:
-            logger.debug(f'[{session_key}] agent 输出: {out[:200]}')
+            if self.backend.returns_reply:
+                await self.reply_fn(chat_id, out, root_id)
+                logger.info(f'自动回复已提交 [{session_key}]')
+            else:
+                logger.debug(f'[{session_key}] agent 输出: {out[:200]}')

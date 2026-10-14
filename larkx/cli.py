@@ -309,6 +309,13 @@ def cmd_download(args):
 
 async def _listen(args, auth):
     client = LarkClient(auth)
+    runtime = getattr(args, 'runtime', None)
+    if runtime:
+        runtime.client = client
+        def connected():
+            runtime.connection = 'connected'
+            runtime.connection_error = ''
+        client.on_connected = connected
     st = Storage()
     cfg_agent = args.agent
     if cfg_agent and (not auth.user_id):
@@ -328,10 +335,22 @@ async def _listen(args, auth):
     print('─' * 56, flush=True)
     dispatcher = None
     if cfg_agent:
-        backend = get_backend()
+        backend = runtime.backend if runtime else get_backend()
         async def reply_fn(chat_id, text, root_id=None):
-            return await asyncio.to_thread(client.send_msg, text, chat_id, root_id)
-        dispatcher = AgentDispatcher(backend, reply_fn)
+            message_id = await asyncio.to_thread(client.send_msg, text, chat_id, root_id)
+            if not message_id:
+                raise RuntimeError('飞书发送结果未确认，请检查日志；不会自动重复发送')
+            return message_id
+        async def image_prepare(msg):
+            from .media import prepare_image, image_messages
+            from .config import DATA_DIR
+            return [await asyncio.to_thread(prepare_image,auth,image,DATA_DIR/'images') for image in image_messages(msg)]
+        if runtime:
+            reply_fn = runtime.reply
+        dispatcher = AgentDispatcher(backend, reply_fn, image_prepare=image_prepare,
+                                     workflow=runtime.engine if runtime else None)
+        if runtime:
+            runtime.dispatcher = dispatcher
     name_cache = {}
     async def on_message(msg):
         chat_id = msg['chat_id']
@@ -353,6 +372,8 @@ async def _listen(args, auth):
         saved = st.save_message(msg, sender_name=sender_name, chat_name=chat_name,
                                 direction='out' if is_own else 'in')
         if saved:
+            if runtime:
+                runtime.on_saved(msg, chat_name, sender_name, is_own)
             where = chat_name or chat_id
             content = msg['content'] or ''
             shown = content[:80] + ('…' if len(content) > 80 else '')
@@ -366,10 +387,14 @@ async def _listen(args, auth):
                 await dispatcher.submit(msg, chat_name=chat_name, sender_name=sender_name, my_user_id=auth.user_id)
     while True:
         try:
+            if runtime:
+                runtime.connection = 'connecting'
             await client.connect_websocket(on_message)
         except AuthExpired:
             raise
         except Exception as e:
+            if runtime:
+                runtime.connection = 'reconnecting'
             logger.warning(f'WS 断开,10s 后重连: {e}')
             await asyncio.sleep(10)
 
@@ -448,6 +473,13 @@ def main():
     p = sub.add_parser('listen', help='常驻接收消息')
     p.add_argument('--agent', action='store_true', help='接本地 coding agent 自动回复')
     p.set_defaults(fn=cmd_listen)
+    p = sub.add_parser('web', help='启动本地工作数字人控制台')
+    p.add_argument('--port', type=int, default=8765)
+    def cmd_web(args):
+        from .workhub.server import run
+        run(args.port)
+        return 0
+    p.set_defaults(fn=cmd_web)
     args = parser.parse_args()
     sys.exit(args.fn(args))
 

@@ -100,6 +100,8 @@ def decode_message_content(message_type, content_bytes):
             pc = P.PostContent()
             pc.ParseFromString(content_bytes)
             d = protobuf_to_dict(pc)
+            from ..media import display_parts
+            d['_display_parts'] = display_parts(2, d)
             title = d.get('title', '')
             text = extract_rich_text(d.get('richText', {})) or d.get('text', '')
             return (f'[富文本] {title}\n{text}'.strip(), d)

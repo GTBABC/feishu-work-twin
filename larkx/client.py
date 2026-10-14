@@ -92,10 +92,11 @@ class LarkClient:
             self._loop_started = True
 
     async def connect_websocket(self, on_message):
-        self._ensure_loop()
         url = self.build_ws_url()
         async with websockets.connect(url) as ws:
             logger.info('WS 已连接')
+            if getattr(self, 'on_connected', None):
+                self.on_connected()
             heartbeat_task = asyncio.create_task(self.heartbeat_loop(ws))
             try:
                 async for raw in ws:
@@ -109,7 +110,7 @@ class LarkClient:
                         for msg in decoders.decode_push_messages(raw):
                             if not msg.get('from_id'):
                                 continue
-                            asyncio.run_coroutine_threadsafe(self._dispatch(msg, on_message), self.loop)
+                            asyncio.create_task(self._dispatch(msg, on_message))
                     except Exception as e:
                         logger.debug(f'跳过异常帧: {e}')
                         continue
@@ -163,6 +164,49 @@ class LarkClient:
             logger.error('服务端已接受发送请求,但响应里没有消息 id,无法确认是否发出')
             return None
         return msg_id
+
+    def upload_image(self, path):
+        import json
+        from pathlib import Path
+        path = Path(path)
+        metadata = {'mime':'image/' + ('jpeg' if path.suffix.lower() in ('.jpg','.jpeg') else path.suffix[1:]),
+                    'name':path.name,'size':path.stat().st_size,'mount_point':'im_file','file_type':'IMAGE'}
+        with path.open('rb') as file:
+            response = requests.post(self.auth.region.file_host + '/uni_api/upload/file', cookies=self.auth.cookies,
+                headers={'X-AppID':self.auth.gateway_app_id,'x-Source':'web','x-web-version':'3.9.32',
+                         'origin':self.auth.region.web_origin,'referer':self.auth.region.messenger_page_url},
+                data={'data':json.dumps(metadata)}, files={'file':(path.name,file,metadata['mime'])}, timeout=30)
+        response.raise_for_status()
+        body = response.json()
+        if body.get('code') != 0 or not (body.get('file') or {}).get('file_key'):
+            raise ValueError('图片上传失败')
+        return body['file']['file_key']
+
+    def send_rich(self, parts, chat_id, root_id=None):
+        from .proto.gateway import resolve_type
+        from .proto.ids import generate_request_cid
+        req = resolve_type('messages.PutMessageRequest')(type=P.POST, chatId=str(chat_id),
+              cid=generate_request_cid(), isNotified=True, version=1)
+        req.content.title = ''; req.content.isNotified = True
+        if root_id:
+            req.rootId = str(root_id); req.parentId = str(root_id)
+            if not self.is_thread_chat(chat_id):req.isReplyInThread = True
+        text = ''.join(p.get('text','') for p in parts)
+        req.content.text = text; req.content.richText.innerText = text
+        for part in parts:
+            eid = generate_request_cid(); req.content.richText.elementIds.append(eid)
+            element = req.content.richText.elements.dictionary[eid]
+            if part['type'] == 'text':
+                element.tag = 1; element.property = P.TextProperty(content=part['text']).SerializeToString()
+            else:
+                key = part['key']; element.tag = 2
+                prop = resolve_type('entities.RichTextElement.ImageProperty')(token=key,originKey=key,
+                       imgCanPreview=True,originWidth=part['width'],originHeight=part['height'],
+                       width=part['width'],height=part['height'],customWidth=part.get('display_width',0),alt='图片')
+                element.property = prop.SerializeToString()
+                req.content.attachments.append(key); req.content.richText.imageIds.append(eid)
+        response = self._gateway_post(builders.wrap_packet(5,req,generate_long_request_id()))
+        return builders.decode_put_message_response(response)
 
     def search(self, query: str):
         pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)

@@ -34,8 +34,18 @@ test.py
 static/resource/worklets/
 
 # 本地资产,不进提交
-tests/
 docs/
 .idea/
 *.egg-info/
 dev/fresh_cookie.txt
+work/
+
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+credentials.json
+.larkx/
+.pytest_cache/
+.ruff_cache/
