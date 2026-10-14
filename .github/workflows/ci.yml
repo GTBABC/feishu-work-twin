@@ -11,7 +11,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       PYTHONUTF8: '1'
-      LARKX_HOME: ${{ runner.temp }}/larkx-tests
+      LARKX_HOME: work/ci-data
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
