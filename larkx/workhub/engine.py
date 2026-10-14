@@ -63,7 +63,11 @@ class WorkEngine:
         chat_id = str(msg["chat_id"])
         handoff = store.handoff(chat_id)
         human_paused = store.human_paused(chat_id) or bool(msg.get("_human_handled"))
-        ctx = store.context(str(msg["chat_id"]), str(msg.get("from_id") or ""))
+        ctx = store.context(
+            str(msg["chat_id"]),
+            str(msg.get("from_id") or ""),
+            anchor=msg.get("anchor") or "",
+        )
         mode = ctx.get("persona", {}).get("mode", "auto")
         paused = store.setting("automation_enabled", "true") != "true"
         prompt = (
@@ -88,6 +92,29 @@ class WorkEngine:
             "只收到寒暄或表情时 facts 和 tasks 留空；不回复仍照常更新有效概览、事实和待办。"
         )
         prompt += "\n回复正文不要附签名或 Bot 尾缀，程序会在发送时统一附上。"
+        prompt += (
+            "\n连续短句要合并理解，不能只针对最后一条回复。群里的单独 @我通常是在提醒我看前文，"
+            "应根据同一发送者的近期消息、他正在回应的问题和图片理解完整含义。"
+            "例如我问 A07 进展，对方连续说‘上面两个截图里面有’‘做好了’然后 @我，"
+            "应理解为 A07 已完成、详情见前面截图，不要再问‘什么做好了’或重复追问进度。"
+            "前文已经足够清楚就简短回应或不回复；只有缺少必要信息才澄清，图片不可见时不编造内容。"
+        )
+        if (
+            msg.get("chat_type") in (2, 3)
+            and store.group_reply_policy(chat_id) == "all"
+        ):
+            prompt += (
+                "\n当前群聊模式：闲聊模式。所有群消息供你判断，不代表每条都要回复。"
+                "你以我本人身份自然参与群聊。优先判断当前话是在对谁说："
+                "明确 @我、点名问我、回答我刚才的问题、接着我的话或对我提出请求时，按语境回应；"
+                "对话自然结束、收到或重复确认仍可不回。"
+                "别人相互问答、对其他人布置任务、和我无关的具体问题，不是对我的请求，通常 should_reply=false。"
+                "其他闲聊由你自行决定，可结合我的角色、背景和兴趣，偶尔插一句自然简短的话；"
+                "只有有趣、贴合话题或能补充有价值的信息时才参与，不抢答、不强行关联工作、不接管别人的讨论。"
+                "结合最近消息里我已经发言的次数；我刚插过一句时通常先保持安静，让别人继续聊，避免连续刷屏。"
+                "不能因为出现问号、新问题或工作词就必回，先判断是否在和我说话。"
+                "不参与时 should_reply=false，reply 为空，不发送“这个与我无关”等解释。"
+            )
         async with self.runtime.model_slots:
             raw = await self.runtime.backend.run(
                 "work:" + session_key,
@@ -146,6 +173,31 @@ class WorkEngine:
         )
         if human_paused:
             send_reply = False
+        if msg.get("chat_type") in (2, 3):
+            # Re-check after generation: switching a group off cancels pending replies.
+            triggers = [
+                m
+                for m in (msg.get("_batch") or [msg])
+                if not m.get("_reply_context_only")
+            ]
+            policy = store.group_reply_policy(chat_id)
+            my_id = str(
+                getattr(getattr(self.runtime.client, "auth", None), "user_id", "")
+            )
+            allowed = (
+                policy == "all"
+                or (policy == "at_all" and any(m.get("at_all") for m in triggers))
+                or (
+                    policy == "at_me"
+                    and any(
+                        (m.get("at_me") and not m.get("at_all"))
+                        or my_id in m.get("at_user_ids", [])
+                        for m in triggers
+                    )
+                )
+            )
+            if not allowed:
+                send_reply = False
         if reply and send_reply and mode == "auto" and not paused:
             await reply_fn(str(msg["chat_id"]), reply, msg.get("anchor") or None)
         elif reply and send_reply and mode != "off" and (mode == "draft" or paused):

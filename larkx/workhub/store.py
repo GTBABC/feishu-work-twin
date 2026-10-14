@@ -1,4 +1,6 @@
 import json
+import math
+import os
 import time
 from datetime import datetime
 from sqlalchemy import desc, select
@@ -48,6 +50,20 @@ class HubStore:
             row.value = value
             s.add(row)
             s.commit()
+
+    def batch_timing(self):
+        def number(key, env, default, ceiling):
+            try:
+                value = float(self.setting(key, os.environ.get(env, str(default))))
+                if not math.isfinite(value):
+                    return default
+                return max(0.01, min(value, ceiling))
+            except (TypeError, ValueError):
+                return default
+
+        delay = number("batch_delay", "LARKX_BATCH_DELAY", 1.5, 30)
+        maximum = number("batch_max_wait", "LARKX_BATCH_MAX_WAIT", 5, 60)
+        return {"batch_delay": delay, "batch_max_wait": max(delay, maximum)}
 
     def handoff(self, chat_id):
         return json.loads(self.setting("human_pause:" + str(chat_id), "{}"))
@@ -135,6 +151,10 @@ class HubStore:
                 data = record(row)
                 p = s.get(Persona, row.persona_key)
                 data["persona"] = record(p) if p else None
+                if p and p.kind == "group":
+                    data["persona"]["group_reply_policy"] = self.group_reply_policy(
+                        row.chat_id
+                    )
                 data["human_pause_until"] = self.handoff(row.chat_id).get("until", 0)
                 last = (
                     s.query(Message)
@@ -153,23 +173,76 @@ class HubStore:
 
     def personas(self):
         with self.storage.Session() as s:
-            return [record(r) for r in s.query(Persona).order_by(Persona.name).all()]
+            result = []
+            for row in s.query(Persona).order_by(Persona.name).all():
+                data = record(row)
+                if row.kind == "group":
+                    data["group_reply_policy"] = self.group_reply_policy(row.chat_id)
+                result.append(data)
+            return result
+
+    def group_reply_policy(self, chat_id):
+        return self.setting("group_reply_policy:" + str(chat_id), "off")
 
     def update_persona(self, key, fields):
         with self.storage.Session() as s:
             row = s.get(Persona, key)
             if not row:
                 raise ValueError("角色不存在")
+            if "group_reply_policy" in fields:
+                policy = fields["group_reply_policy"]
+                if row.kind != "group" or policy not in (
+                    "off",
+                    "all",
+                    "at_me",
+                    "at_all",
+                ):
+                    raise ValueError("群聊回复选项无效")
+                key = "group_reply_policy:" + str(row.chat_id)
+                setting = s.get(Setting, key) or Setting(key=key)
+                setting.value = policy
+                s.add(setting)
             for field in ("role", "description", "reply_style", "mode"):
                 if field in fields:
                     setattr(row, field, fields[field])
             if row.mode not in ("auto", "draft", "off"):
                 raise ValueError("回复模式无效")
+            if "group_reply_policy" in fields:
+                row.mode = "off" if policy == "off" else "auto"
             row.updated_at = datetime.now()
             s.commit()
-            return record(row)
+            data = record(row)
+            if row.kind == "group":
+                data["group_reply_policy"] = self.group_reply_policy(row.chat_id)
+            return data
 
-    def context(self, chat_id, sender_id=""):
+    def reply_context(self, msg, limit=24):
+        """Actual messages from the same chat/thread, including non-triggering ones."""
+        with self.storage.Session() as session:
+            current = (
+                session.query(Message)
+                .filter_by(
+                    chat_id=str(msg["chat_id"]), msg_id=str(msg.get("msg_id") or "")
+                )
+                .first()
+            )
+            rows = session.query(Message).filter_by(
+                chat_id=str(msg["chat_id"]), anchor=msg.get("anchor") or ""
+            )
+            if current:
+                rows = rows.filter(Message.id <= current.id)
+            result = []
+            for row in reversed(rows.order_by(desc(Message.id)).limit(limit).all()):
+                data = record(row)
+                data["content"] = (row.content or "")[:1500]
+                data["from_id"] = row.sender_id
+                data["_sender_name"] = row.sender_name
+                data["_chat_name"] = row.chat_name
+                data["content_data"] = json.loads(row.content_data or "{}")
+                result.append(data)
+            return result
+
+    def context(self, chat_id, sender_id="", anchor=None):
         with self.storage.Session() as s:
             c = s.get(Conversation, str(chat_id))
             p = s.get(Persona, c.persona_key) if c else None
@@ -187,13 +260,10 @@ class HubStore:
                 .limit(20)
                 .all()
             )
-            recent = (
-                s.query(Message)
-                .filter_by(chat_id=str(chat_id))
-                .order_by(desc(Message.id))
-                .limit(12)
-                .all()
-            )
+            recent_query = s.query(Message).filter_by(chat_id=str(chat_id))
+            if anchor is not None:
+                recent_query = recent_query.filter_by(anchor=anchor)
+            recent = recent_query.order_by(desc(Message.id)).limit(24).all()
             return {
                 "overview": c.overview if c else "",
                 "persona": record(p) if p else {},
@@ -203,6 +273,10 @@ class HubStore:
                 "recent_messages": [
                     {
                         "sender": r.sender_name,
+                        "sender_id": r.sender_id,
+                        "msg_id": r.msg_id,
+                        "time": r.create_time,
+                        "anchor": r.anchor,
                         "direction": r.direction,
                         "content": r.content[:1500],
                     }

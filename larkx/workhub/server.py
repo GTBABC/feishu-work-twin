@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -413,6 +414,20 @@ def create_app(runtime=None, start_bridge=True):
         ):
             raise ValueError("回复尾缀最多 200 字符")
         r = hub(request)
+        timing = r.hub.batch_timing()
+        for key, upper in (("batch_delay", 30), ("batch_max_wait", 60)):
+            if key in fields:
+                value = fields[key]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or not 0.1 <= value <= upper
+                ):
+                    raise ValueError(f"{key} 必须是 0.1 到 {upper} 秒之间的数字")
+                timing[key] = float(value)
+        if timing["batch_max_wait"] < timing["batch_delay"]:
+            raise ValueError("最长等待时间不能小于停顿时间")
         if "own_rules" in fields:
             if len(fields["own_rules"]) > 12000:
                 raise ValueError("数字人说明过长")
@@ -427,6 +442,9 @@ def create_app(runtime=None, start_bridge=True):
             if not isinstance(suffix, str) or len(suffix) > 200:
                 raise ValueError("回复尾缀最多 200 字符")
             r.hub.set_setting("reply_suffix", suffix.strip())
+        for key in ("batch_delay", "batch_max_wait"):
+            if key in fields:
+                r.hub.set_setting(key, str(timing[key]))
         return r.status()
 
     @app.post("/api/control")

@@ -1,14 +1,33 @@
 from protobuf_to_dict import protobuf_to_dict
 from . import proto_pb2 as P
+
 MSG_TYPE_NAMES = {
-    0: 'UNKNOWN', 2: 'POST', 3: 'FILE', 4: 'TEXT', 5: 'IMAGE', 6: 'SYSTEM',
-    7: 'AUDIO', 8: 'EMAIL', 9: 'SHARE_GROUP_CHAT', 10: 'STICKER',
-    11: 'MERGE_FORWARD', 12: 'CALENDAR', 13: 'CLOUD_FILE', 14: 'CARD',
-    15: 'MEDIA', 16: 'SHARE_CALENDAR_EVENT', 17: 'HONGBAO',
-    18: 'GENERAL_CALENDAR', 19: 'VIDEO_CHAT', 20: 'LOCATION',
-    22: 'COMMERCIALIZED_HONGBAO', 23: 'SHARE_USER_CARD', 24: 'TODO', 25: 'FOLDER',
+    0: "UNKNOWN",
+    2: "POST",
+    3: "FILE",
+    4: "TEXT",
+    5: "IMAGE",
+    6: "SYSTEM",
+    7: "AUDIO",
+    8: "EMAIL",
+    9: "SHARE_GROUP_CHAT",
+    10: "STICKER",
+    11: "MERGE_FORWARD",
+    12: "CALENDAR",
+    13: "CLOUD_FILE",
+    14: "CARD",
+    15: "MEDIA",
+    16: "SHARE_CALENDAR_EVENT",
+    17: "HONGBAO",
+    18: "GENERAL_CALENDAR",
+    19: "VIDEO_CHAT",
+    20: "LOCATION",
+    22: "COMMERCIALIZED_HONGBAO",
+    23: "SHARE_USER_CARD",
+    24: "TODO",
+    25: "FOLDER",
 }
-CHAT_TYPE_NAMES = {0: 'UNKNOWN', 1: 'P2P', 2: 'GROUP', 3: 'TOPIC_GROUP'}
+CHAT_TYPE_NAMES = {0: "UNKNOWN", 1: "P2P", 2: "GROUP", 3: "TOPIC_GROUP"}
 # Chat.ChatMode 的 THREAD / THREAD_V2;新建的话题群是 GROUP + 这两种模式,旧版话题群才是 TOPIC_GROUP
 THREAD_CHAT_MODES = (2, 3)
 
@@ -29,38 +48,50 @@ def enum_to_int(value):
 
 def is_thread_chat(chat_info: dict) -> bool:
     """话题群里每条根消息自成一个话题。chat_info 为 chats.PullChatsByIdsRequest 返回的单个会话。"""
-    return enum_to_int(chat_info.get('chatMode', 0)) in THREAD_CHAT_MODES or enum_to_int(chat_info.get('type', 0)) == 3
+    return (
+        enum_to_int(chat_info.get("chatMode", 0)) in THREAD_CHAT_MODES
+        or enum_to_int(chat_info.get("type", 0)) == 3
+    )
 
 
-def resolve_scope(msg_id: str, msg_type: int, chat_type: int, root_id: str, thread_id: str, thread_chat: bool=False) -> tuple:
+def resolve_scope(
+    msg_id: str,
+    msg_type: int,
+    chat_type: int,
+    root_id: str,
+    thread_id: str,
+    thread_chat: bool = False,
+) -> tuple:
     """返回 (scope, anchor):anchor 是回复时的 --root,也是 agent 的会话边界。"""
     if chat_type == 1:
-        return ('chat', '')
-    if root_id and root_id != '0':
-        return ('topic', thread_id or root_id)
+        return ("chat", "")
+    if root_id and root_id != "0":
+        return ("topic", thread_id or root_id)
     # 话题群的根消息本身就开启一个话题(建群等系统提示除外);普通群每条消息也带 threadId=自身 id,不能据此判断
     if (thread_chat or chat_type == 3) and msg_type != 6:
-        return ('topic', msg_id or '')
-    return ('chat', '')
+        return ("topic", msg_id or "")
+    return ("chat", "")
 
 
 def extract_rich_text(rich_text_dict):
-    TAG_PLACEHOLDERS = {2: '[图片]', 5: '[@]', 10: '[表情]', 18: '[视频]', 22: '[文档]'}
-    text = ''
+    TAG_PLACEHOLDERS = {2: "[图片]", 5: "[@]", 10: "[表情]", 18: "[视频]", 22: "[文档]"}
+    text = ""
     try:
-        dictionary = rich_text_dict['elements']['dictionary']
-        element_ids = rich_text_dict.get('elementIds') or []
+        dictionary = rich_text_dict["elements"]["dictionary"]
+        element_ids = rich_text_dict.get("elementIds") or []
         if element_ids:
             ordered = [(k, dictionary[k]) for k in element_ids if k in dictionary]
-            ordered += [(k, v) for k, v in dictionary.items() if k not in set(element_ids)]
+            ordered += [
+                (k, v) for k, v in dictionary.items() if k not in set(element_ids)
+            ]
         else:
             try:
                 ordered = sorted(dictionary.items(), key=lambda item: int(item[0]))
             except Exception:
                 ordered = list(dictionary.items())
         for k, v in ordered:
-            tag = v.get('tag', 1)
-            prop = v.get('property')
+            tag = v.get("tag", 1)
+            prop = v.get("property")
             if not prop:
                 continue
             if tag in (1, 3, 7, 8, 9, 17):
@@ -69,7 +100,7 @@ def extract_rich_text(rich_text_dict):
                     tp.ParseFromString(prop)
                     text += tp.content
                     if tag == 3:
-                        text += '\n'
+                        text += "\n"
                     continue
                 except Exception:
                     pass
@@ -82,7 +113,7 @@ def extract_rich_text(rich_text_dict):
                         continue
                 except Exception:
                     pass
-            text += TAG_PLACEHOLDERS.get(tag, '')
+            text += TAG_PLACEHOLDERS.get(tag, "")
     except Exception:
         pass
     return text
@@ -94,100 +125,135 @@ def decode_message_content(message_type, content_bytes):
             tc = P.TextContent()
             tc.ParseFromString(content_bytes)
             d = protobuf_to_dict(tc)
-            text = extract_rich_text(d.get('richText', {})) or d.get('text', '')
+            text = extract_rich_text(d.get("richText", {})) or d.get("text", "")
             return (text, d)
         if message_type == 2:
             pc = P.PostContent()
             pc.ParseFromString(content_bytes)
             d = protobuf_to_dict(pc)
             from ..media import display_parts
-            d['_display_parts'] = display_parts(2, d)
-            title = d.get('title', '')
-            text = extract_rich_text(d.get('richText', {})) or d.get('text', '')
-            return (f'[富文本] {title}\n{text}'.strip(), d)
+
+            d["_display_parts"] = display_parts(2, d)
+            title = d.get("title", "")
+            text = extract_rich_text(d.get("richText", {})) or d.get("text", "")
+            return (f"[富文本] {title}\n{text}".strip(), d)
         if message_type == 5:
             ic = P.ImageContent()
             ic.ParseFromString(content_bytes)
             d = protobuf_to_dict(ic)
-            v2 = d.get('imageV2') or {}
+            v2 = d.get("imageV2") or {}
             if v2:
-                key = v2.get('imageKey', '')
-                width = height = '?'
-                for variant in v2.get('variants', []):
-                    if variant.get('type') == 1:
-                        size = variant.get('size') or {}
-                        width, height = (size.get('width', '?'), size.get('height', '?'))
+                key = v2.get("imageKey", "")
+                width = height = "?"
+                for variant in v2.get("variants", []):
+                    if variant.get("type") == 1:
+                        size = variant.get("size") or {}
+                        width, height = (
+                            size.get("width", "?"),
+                            size.get("height", "?"),
+                        )
                         break
-                has_crypto = 'crypto' in v2
-                return (f"[图片] imageKey={key} ({width}x{height}){(' 已加密' if has_crypto else '')}", d)
-            img = (d.get('image') or {}).get('origin') or {}
-            key = img.get('key') or (d.get('image') or {}).get('key') or (d.get('image') or {}).get('imageKey', '')
-            return (f"[图片] imageKey={key} ({img.get('width', '?')}x{img.get('height', '?')})", d)
+                has_crypto = "crypto" in v2
+                return (
+                    f"[图片] imageKey={key} ({width}x{height}){(' 已加密' if has_crypto else '')}",
+                    d,
+                )
+            img = (d.get("image") or {}).get("origin") or {}
+            key = (
+                img.get("key")
+                or (d.get("image") or {}).get("key")
+                or (d.get("image") or {}).get("imageKey", "")
+            )
+            return (
+                f"[图片] imageKey={key} ({img.get('width', '?')}x{img.get('height', '?')})",
+                d,
+            )
         if message_type == 3:
             fc = P.FileContent()
             fc.ParseFromString(content_bytes)
             d = protobuf_to_dict(fc)
-            return (f"[文件] {d.get('name', '')} ({d.get('mime', '')}, {d.get('size', 0)}字节, key={d.get('key', '')})", d)
+            return (
+                f"[文件] {d.get('name', '')} ({d.get('mime', '')}, {d.get('size', 0)}字节, key={d.get('key', '')})",
+                d,
+            )
         if message_type == 15:
             mc = P.MediaContent()
             mc.ParseFromString(content_bytes)
             d = protobuf_to_dict(mc)
-            return (f"[视频] {d.get('name', '')} (时长{d.get('duration', 0) / 1000:.1f}s, {d.get('size', 0)}字节, key={d.get('key', '')})", d)
+            return (
+                f"[视频] {d.get('name', '')} (时长{d.get('duration', 0) / 1000:.1f}s, {d.get('size', 0)}字节, key={d.get('key', '')})",
+                d,
+            )
         if message_type == 7:
             ac = P.AudioContent()
             ac.ParseFromString(content_bytes)
             d = protobuf_to_dict(ac)
-            return (f"[语音] 时长{d.get('duration', 0) / 1000:.1f}s, key={d.get('key', '')}", d)
+            return (
+                f"[语音] 时长{d.get('duration', 0) / 1000:.1f}s, key={d.get('key', '')}",
+                d,
+            )
         if message_type == 10:
             sc = P.StickerContent()
             sc.ParseFromString(content_bytes)
             d = protobuf_to_dict(sc)
-            return (f"[表情包] stickerId={d.get('stickerId', '')} key={d.get('key', '')}", d)
+            return (
+                f"[表情包] stickerId={d.get('stickerId', '')} key={d.get('key', '')}",
+                d,
+            )
         if message_type == 14:
             cc = P.CardContent()
             cc.ParseFromString(content_bytes)
             d = protobuf_to_dict(cc)
-            header = d.get('cardHeader') or {}
-            title = header.get('title') or header.get('mainTitle') or ''
-            json_card = d.get('jsonCard', '')
-            parts = ['[卡片]']
+            header = d.get("cardHeader") or {}
+            title = header.get("title") or header.get("mainTitle") or ""
+            json_card = d.get("jsonCard", "")
+            parts = ["[卡片]"]
             if title:
                 parts.append(title)
-            if d.get('cardDesc'):
+            if d.get("cardDesc"):
                 parts.append(f"({d['cardDesc']})")
             if json_card:
                 parts.append(json_card[:2000])
-            elif d.get('openCardContent'):
+            elif d.get("openCardContent"):
                 parts.append(f"<openCardContent {len(d['openCardContent'])}字节>")
-            return (' '.join(parts), d)
+            return (" ".join(parts), d)
         if message_type == 11:
             mfc = P.MergeForwardContent()
             mfc.ParseFromString(content_bytes)
             d = protobuf_to_dict(mfc)
-            msgs = d.get('messages', [])
-            name = d.get('groupChatName') or f"{d.get('p2pCreatorName', '')}与{d.get('p2pPartnerName', '')}的会话"
-            lines = [f'[合并转发] {name} 共{len(msgs)}条:']
+            msgs = d.get("messages", [])
+            name = (
+                d.get("groupChatName")
+                or f"{d.get('p2pCreatorName', '')}与{d.get('p2pPartnerName', '')}的会话"
+            )
+            lines = [f"[合并转发] {name} 共{len(msgs)}条:"]
             for m in msgs[:20]:
-                sub_type = enum_to_int(m.get('type', 0))
-                sub_summary, _ = decode_message_content(sub_type, m.get('content', b''))
+                sub_type = enum_to_int(m.get("type", 0))
+                sub_summary, _ = decode_message_content(sub_type, m.get("content", b""))
                 lines.append(f"  {m.get('fromId', '')}: {sub_summary}")
-            return ('\n'.join(lines), d)
+            return ("\n".join(lines), d)
         if message_type == 20:
             lc = P.LocationContent()
             lc.ParseFromString(content_bytes)
             d = protobuf_to_dict(lc)
-            desc = d.get('locationDescription') or {}
-            return (f"[位置] {desc.get('name', '')} {desc.get('description', '')} ({d.get('latitude', '')},{d.get('longitude', '')})", d)
+            desc = d.get("locationDescription") or {}
+            return (
+                f"[位置] {desc.get('name', '')} {desc.get('description', '')} ({d.get('latitude', '')},{d.get('longitude', '')})",
+                d,
+            )
         if message_type == 6:
             sc = P.SystemContent()
             sc.ParseFromString(content_bytes)
             d = protobuf_to_dict(sc)
             texts = []
-            for cv in (d.get('sysContentValues') or {}).values():
-                for item in (cv or {}).get('items', []):
-                    if item.get('text'):
-                        texts.append(item['text'])
-            return (f"[系统消息] type={d.get('typeNum') or d.get('type', '')} {' '.join(texts)}", d)
+            for cv in (d.get("sysContentValues") or {}).values():
+                for item in (cv or {}).get("items", []):
+                    if item.get("text"):
+                        texts.append(item["text"])
+            return (
+                f"[系统消息] type={d.get('typeNum') or d.get('type', '')} {' '.join(texts)}",
+                d,
+            )
         if message_type == 23:
             sc = P.ShareUserCardContent()
             sc.ParseFromString(content_bytes)
@@ -197,10 +263,10 @@ def decode_message_content(message_type, content_bytes):
             sc = P.ShareGroupChatContent()
             sc.ParseFromString(content_bytes)
             d = protobuf_to_dict(sc)
-            chat = d.get('chat') or {}
-            chat_name = chat.get('name', '')
-            chat_id = d.get('chatId') or chat.get('id', '')
-            return (f'[群分享] {chat_name} (chatId={chat_id})', d)
+            chat = d.get("chat") or {}
+            chat_name = chat.get("name", "")
+            chat_id = d.get("chatId") or chat.get("id", "")
+            return (f"[群分享] {chat_name} (chatId={chat_id})", d)
         if message_type == 16:
             sc = P.ShareCalendarEventContent()
             sc.ParseFromString(content_bytes)
@@ -220,16 +286,19 @@ def decode_message_content(message_type, content_bytes):
             vc = P.VideoChatContent()
             vc.ParseFromString(content_bytes)
             d = protobuf_to_dict(vc)
-            topic = (d.get('meetingCard') or {}).get('topic', '')
-            return (f'[视频会议] {topic}', d)
+            topic = (d.get("meetingCard") or {}).get("topic", "")
+            return (f"[视频会议] {topic}", d)
         if message_type == 8:
             ec = P.EmailContent()
             ec.ParseFromString(content_bytes)
             d = protobuf_to_dict(ec)
             return (f"[邮件] {d.get('title', '')} {d.get('text', '')}", d)
     except Exception as e:
-        return (f'[{MSG_TYPE_NAMES.get(message_type, message_type)}消息解析失败: {e}]', None)
-    return (f'[{MSG_TYPE_NAMES.get(message_type, message_type)}类型消息]', None)
+        return (
+            f"[{MSG_TYPE_NAMES.get(message_type, message_type)}消息解析失败: {e}]",
+            None,
+        )
+    return (f"[{MSG_TYPE_NAMES.get(message_type, message_type)}类型消息]", None)
 
 
 def parse_ws_frame(raw: bytes):
@@ -242,20 +311,72 @@ def parse_ws_frame(raw: bytes):
     return (frame_d, packet_d)
 
 
+def mention_targets(data):
+    """Only real rich-text mention nodes count; typed '@全体成员' is plain text."""
+    ids = []
+    at_all = False
+    rich = (data or {}).get("richText") or {}
+    for element in (rich.get("elements") or {}).get("dictionary", {}).values():
+        if element.get("tag") != 5:
+            continue
+        try:
+            prop = P.AtProperty()
+            prop.ParseFromString(element.get("property") or b"")
+            if prop.userId:
+                ids.append(str(prop.userId))
+            if prop.userId == "all" or prop.content.strip() in (
+                "@全体成员",
+                "@所有人",
+                "@全体",
+                "@all",
+                "@All",
+                "@everyone",
+            ):
+                at_all = True
+        except Exception:
+            continue
+    return ids, at_all
+
+
 def decode_push_messages(raw: bytes):
     _, packet = parse_ws_frame(raw)
     out = []
-    if 'payload' not in packet:
+    if "payload" not in packet:
         return out
     pmr = P.PushMessagesRequest()
-    pmr.ParseFromString(packet['payload'])
+    pmr.ParseFromString(packet["payload"])
     pmr_d = protobuf_to_dict(pmr)
-    at_me_map = pmr_d.get('messagesAtMe') or {}
-    for k, v in (pmr_d.get('messages') or {}).items():
-        message_type = enum_to_int(v.get('type', 0))
-        chat_type = enum_to_int(v.get('chatType', 0))
-        summary, data = decode_message_content(message_type, v.get('content', b''))
-        root_id = v.get('rootId') or ''
-        scope, anchor = resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '')
-        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data})
+    at_me_map = pmr_d.get("messagesAtMe") or {}
+    for k, v in (pmr_d.get("messages") or {}).items():
+        message_type = enum_to_int(v.get("type", 0))
+        chat_type = enum_to_int(v.get("chatType", 0))
+        summary, data = decode_message_content(message_type, v.get("content", b""))
+        at_user_ids, at_all = mention_targets(data)
+        root_id = v.get("rootId") or ""
+        scope, anchor = resolve_scope(
+            v.get("id"), message_type, chat_type, root_id, v.get("threadId") or ""
+        )
+        out.append(
+            {
+                "msg_id": v.get("id"),
+                "msg_type": message_type,
+                "msg_type_name": MSG_TYPE_NAMES.get(message_type, str(message_type)),
+                "from_id": v.get("fromId"),
+                "chat_id": v.get("chatId") or v.get("channelId"),
+                "chat_type": chat_type,
+                "chat_type_name": CHAT_TYPE_NAMES.get(chat_type, str(chat_type)),
+                "scope": scope,
+                "anchor": anchor,
+                "at_me": bool(at_me_map.get(v.get("id")) or at_me_map.get(k)),
+                "root_id": root_id,
+                "parent_id": v.get("parentId") or "",
+                "cid": v.get("cid") or "",
+                "position": v.get("position"),
+                "create_time": v.get("createTime"),
+                "content": summary,
+                "content_data": data,
+            }
+        )
+        out[-1]["at_user_ids"] = at_user_ids
+        out[-1]["at_all"] = at_all
     return out

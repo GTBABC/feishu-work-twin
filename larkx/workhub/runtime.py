@@ -350,5 +350,6 @@ class HubRuntime:
             "own_rules": self.hub.setting("own_rules", DEFAULT_RULES),
             "last_analysis": self.last_analysis,
             "reply_suffix": self.hub.setting("reply_suffix", DEFAULT_SUFFIX),
-            "rules": "私聊自动处理，群聊仅 @你才自动回复；普通群消息只更新记忆和待办",
+            **self.hub.batch_timing(),
+            "rules": "私聊自动处理；群聊默认不回复，可逐群选择闲聊模式、@我或@全体",
         }

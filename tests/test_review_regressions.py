@@ -96,7 +96,7 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
             FakeBackend(),
             None,
             image_prepare=prepare,
-            workflow=SimpleNamespace(process=process),
+            workflow=SimpleNamespace(process=process, runtime=self.runtime),
         )
         await dispatcher.handle_message("c:", msg)
         self.assertEqual(captured, ["first.png", "second.png"])
