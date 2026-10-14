@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "feishu-work-twin": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "E:\\Myproject\\LarkAgentX",
+        "--no-sync",
+        "python",
+        "-m",
+        "larkx.workhub.mcp_server"
+      ]
+    }
+  }
+}

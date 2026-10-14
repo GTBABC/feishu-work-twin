@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -46,13 +46,20 @@ class ImageUploadBody(BaseModel):
 
 
 def create_app(runtime=None, start_bridge=True):
+    from .mcp_server import HubAccess, create_mcp
+
+    access = HubAccess(lambda: app.state.hub)
+    mcp = create_mcp(access)
+    mcp_app = mcp.streamable_http_app(json_response=True, stateless_http=True)
+
     @asynccontextmanager
     async def lifespan(app):
         app.state.hub = runtime or HubRuntime()
         if start_bridge:
             await app.state.hub.start()
         try:
-            yield
+            async with mcp.session_manager.run():
+                yield
         finally:
             await app.state.hub.stop()
 
@@ -86,6 +93,28 @@ def create_app(runtime=None, start_bridge=True):
         return FileResponse(STATIC / "index.html")
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    @app.get("/api/integration/status")
+    async def integration_status():
+        return await access.status()
+
+    @app.get("/api/integration/conversations")
+    async def integration_conversations(
+        query: str = Query(default="", max_length=200),
+        kind: Literal["all", "private", "group"] = "all",
+        limit: int = Query(default=30, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
+        return await access.conversations(query, kind, limit, offset)
+
+    @app.get("/api/integration/messages")
+    async def integration_messages(
+        chat_id: str = Query(default="", max_length=40),
+        query: str = Query(default="", max_length=200),
+        limit: int = Query(default=50, ge=1, le=100),
+        before_id: int | None = Query(default=None, ge=1),
+    ):
+        return await access.messages(chat_id, query, limit, before_id)
 
     @app.get("/api/state")
     async def state(request: Request):
@@ -417,6 +446,8 @@ def create_app(runtime=None, start_bridge=True):
             result["result"] = json.loads(result["result"])
         return result
 
+    # Keep the catch-all mount last so it cannot hide existing API/UI routes.
+    app.mount("/", mcp_app)
     return app
 
 

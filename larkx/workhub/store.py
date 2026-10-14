@@ -1,7 +1,7 @@
 import json
 import time
 from datetime import datetime
-from sqlalchemy import desc
+from sqlalchemy import desc, select
 from ..storage import Storage
 from ..storage.models import Message
 from .models import Persona, Conversation, Task, Memory, Action, Setting, Job
@@ -227,6 +227,103 @@ class HubStore:
 
     def messages(self, chat_id, limit=80):
         return [record(r) for r in self.storage.get_messages(chat_id, limit=limit)]
+
+    def find_conversations(self, query="", kind="all", limit=30, offset=0):
+        query = query.strip().casefold()
+        # MCP needs names/IDs, not every persona, task count and handoff setting.
+        # Fetch lightweight rows together rather than reusing the UI's N+1 queries.
+        with self.storage.Session() as session:
+            latest = (
+                select(Message.content)
+                .where(Message.chat_id == Conversation.chat_id)
+                .order_by(desc(Message.id))
+                .limit(1)
+                .scalar_subquery()
+            )
+            statement = session.query(
+                Conversation.chat_id,
+                Conversation.name,
+                Conversation.kind,
+                Persona.name.label("person_name"),
+                Persona.external_id,
+                latest.label("last_message"),
+            ).outerjoin(Persona, Conversation.persona_key == Persona.key)
+            if kind != "all":
+                statement = statement.filter(Conversation.kind == kind)
+            rows = [
+                dict(r._mapping)
+                for r in statement.order_by(
+                    desc(Conversation.updated_at), Conversation.chat_id
+                ).all()
+            ]
+        if query:
+            rows = [
+                c
+                for c in rows
+                if any(
+                    query in str(v or "").casefold()
+                    for v in (
+                        c["name"],
+                        c["chat_id"],
+                        c["person_name"],
+                        c["external_id"],
+                    )
+                )
+            ]
+        selected = rows[offset : offset + limit]
+        for row in selected:
+            row["last_message"] = (row["last_message"] or "")[:120]
+        return {
+            "conversations": [
+                {k: c[k] for k in ("chat_id", "name", "kind", "last_message")}
+                for c in selected
+            ],
+            "next_offset": offset + limit if offset + limit < len(rows) else None,
+            "total": len(rows),
+        }
+
+    def find_messages(self, chat_id="", query="", limit=50, before_id=None):
+        from ..media import display_parts
+
+        with self.storage.Session() as session:
+            if chat_id and not session.get(Conversation, chat_id):
+                raise ValueError("会话不存在，请先搜索会话")
+            rows = session.query(Message)
+            if chat_id:
+                rows = rows.filter(Message.chat_id == chat_id)
+            if query:
+                rows = rows.filter(Message.content.contains(query, autoescape=True))
+            if before_id is not None:
+                rows = rows.filter(Message.id < before_id)
+            found = rows.order_by(desc(Message.id)).limit(limit + 1).all()
+            selected = found[:limit]
+            messages = []
+            for row in selected:
+                data = {
+                    k: getattr(row, k)
+                    for k in (
+                        "id",
+                        "msg_id",
+                        "chat_id",
+                        "chat_name",
+                        "sender_id",
+                        "sender_name",
+                        "direction",
+                        "content",
+                        "create_time",
+                        "msg_type",
+                        "anchor",
+                    )
+                }
+                data["display_parts"] = display_parts(
+                    row.msg_type, json.loads(row.content_data or "{}")
+                )
+                messages.append(data)
+            return {
+                "messages": messages,
+                "next_before_id": selected[-1].id if len(found) > limit else None,
+                "source": "local_synced_history",
+            }
 
     def memories(self, chat_id):
         with self.storage.Session() as s:

@@ -42,6 +42,26 @@ uv run lark web --port 8765
 
 控制台的明确发送指令会执行。发送结果无法确认时保留为待核对，不自动重发；提交相同请求 ID 不会再次发送。实际编码、排期、审批等工作不会仅凭聊天请求被标记为已完成。
 
+## MCP 接入
+
+启动工作台后，本机 MCP 地址为 `http://127.0.0.1:8765/mcp`，传输方式选 **Streamable HTTP**。MCP 与网页共用同一个飞书连接，不需要重新登录。当前只供本机应用访问，不支持云端应用直接连接。
+
+仅支持 stdio 的应用，可参考 [mcp-config.example.json](mcp-config.example.json) 配置命令，修改为自己的 uv 和项目路径。实际启动命令为：
+
+```powershell
+uv run --directory E:\Myproject\LarkAgentX --no-sync python -m larkx.workhub.mcp_server
+```
+
+工作台使用其他端口时，在命令最后添加 `--hub-url http://127.0.0.1:其他端口`。
+
+提供 `get_status`、`search_conversations`、`get_chat_history`、`search_messages`、`send_message` 五个工具。记录来自本机已同步的数据库，并非飞书全部历史；查询返回 `next_before_id` 可翻页，会话搜索使用 `next_offset` 翻页。
+
+先搜索联系人或群聊，取得明确的 `chat_id`，再发送。重名会返回多个会话，不自动猜测。发送需指定消息正文和唯一 `request_id`（建议 UUID），同一发送的重试必须复用 ID。仅 `status=sent` 表示成功，`uncertain` 应先在飞书核对，不换 ID 重发。发送沿用设置中的文字尾缀，写入执行记录，并触发 2 分钟人工接管。
+
+客户端提示示例：“查边泽文最近 30 条聊天记录”“搜索关于上线排期的消息”“给边泽文发送：下午三点开会”。请在客户端启用发送工具的确认提示。
+
+MCP 协议实现使用 [官方 Python SDK](https://github.com/modelcontextprotocol/python-sdk)。
+
 ## 开发验证
 
 ```powershell
