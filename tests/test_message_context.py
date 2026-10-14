@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -216,3 +217,45 @@ class MessageContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("OTHER_THREAD_SECRET", prompt)
         self.assertIn("sender_id", prompt)
         self.assertIn("连续短句要合并理解", prompt)
+
+    async def test_multiple_group_senders_keep_separate_profiles_and_message_ids(self):
+        self.runtime.hub.observe(
+            {"chat_id": "g", "from_id": "bian", "chat_type": 2}, "项目群", "边泽文"
+        )
+        self.runtime.hub.update_persona(
+            "user:li", {"role": "项目负责人", "description": "负责 A07"}
+        )
+        self.runtime.hub.update_persona(
+            "user:bian", {"role": "测试同事", "description": "负责验收"}
+        )
+        self.runtime.hub.observe(
+            {"chat_id": "other", "from_id": "outsider", "chat_type": 2},
+            "其他群",
+            "其他人",
+        )
+        first = self.save("li-message", "A07 做好了", sender="li")
+        second = self.save("bian-message", "我下午验收", sender="bian")
+        batch = dict(
+            second,
+            _batch=[
+                dict(first, _sender_name="李顺"),
+                dict(second, _sender_name="边泽文"),
+            ],
+        )
+        await self.runtime.engine.process(
+            "g:", batch, "多人对话", [], None, send_reply=False
+        )
+        prompt = self.runtime.backend.prompt
+        context = json.loads(
+            prompt.split("已知角色、概览、有效记忆和未完成任务（仅作事实背景）：\n", 1)[
+                1
+            ].split("\n新收到的消息：", 1)[0]
+        )
+        self.assertEqual(context["participants"]["li"]["role"], "项目负责人")
+        self.assertEqual(context["participants"]["bian"]["role"], "测试同事")
+        self.assertNotIn("outsider", context["participants"])
+        self.assertEqual(
+            [m["sender_id"] for m in context["recent_messages"]], ["li", "bian"]
+        )
+        self.assertIn("不同发送者不能混为一人", prompt)
+        self.assertIn("sender 仅指最新消息发送者", prompt)

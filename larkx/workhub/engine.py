@@ -1,5 +1,6 @@
 import json
 import re
+from copy import deepcopy
 from .store import DEFAULT_RULES
 
 
@@ -68,8 +69,43 @@ class WorkEngine:
             str(msg.get("from_id") or ""),
             anchor=msg.get("anchor") or "",
         )
+        if msg.get("chat_type") in (2, 3):
+            names = {
+                str(row.get("sender_id") or ""): row.get("sender") or ""
+                for row in ctx.get("recent_messages", [])
+                if row.get("sender_id")
+            }
+            for member in msg.get("_batch") or [msg]:
+                user_id = str(member.get("from_id") or "")
+                if user_id:
+                    names[user_id] = member.get("_sender_name") or names.get(
+                        user_id, ""
+                    )
+            profiles = store.user_profiles(names)
+            ctx["participants"] = {
+                user_id: profiles.get(user_id) or {"external_id": user_id, "name": name}
+                for user_id, name in names.items()
+            }
+            ctx["self_user_id"] = str(
+                getattr(getattr(self.runtime.client, "auth", None), "user_id", "")
+            )
         mode = ctx.get("persona", {}).get("mode", "auto")
         paused = store.setting("automation_enabled", "true") != "true"
+        my_id = str(getattr(getattr(self.runtime.client, "auth", None), "user_id", ""))
+        required_reply = bool(
+            send_reply
+            and msg.get("chat_type") in (2, 3)
+            and store.group_reply_policy(chat_id) == "all"
+            and any(
+                not member.get("_reply_context_only")
+                and str(member.get("from_id") or "") != my_id
+                and (
+                    (member.get("at_me") and not member.get("at_all"))
+                    or (my_id and my_id in member.get("at_user_ids", []))
+                )
+                for member in msg.get("_batch") or [msg]
+            )
+        )
         prompt = (
             "工作规则："
             + store.setting("own_rules", DEFAULT_RULES)
@@ -93,7 +129,14 @@ class WorkEngine:
         )
         prompt += "\n回复正文不要附签名或 Bot 尾缀，程序会在发送时统一附上。"
         prompt += (
-            "\n连续短句要合并理解，不能只针对最后一条回复。群里的单独 @我通常是在提醒我看前文，"
+            "\n每条消息的 sender id / sender_id 是独立发送者身份，群里多人不等于同一个人。"
+            "participants 按用户 ID 给出各自角色；sender 仅指最新消息发送者，不能把他的角色、任务、承诺或观点套给其他人。"
+            "仅同一发送者的连续短句可拼接理解；不同发送者的消息按群内对话顺序联系起来，但必须保留是谁说的。"
+            "先区分提问者、回答者和被点名的人，再判断谁在对我说话、谁在回应别人。"
+            "多人各自提问时分别判断，不能把甲的问题和乙的回答归给一个人。身份或指向不明时不猜测归属。"
+        )
+        prompt += (
+            "\n同一发送者的连续短句要合并理解，不同发送者不能混为一人，不能只针对最后一条回复。群里的单独 @我通常是在提醒我看前文，"
             "应根据同一发送者的近期消息、他正在回应的问题和图片理解完整含义。"
             "例如我问 A07 进展，对方连续说‘上面两个截图里面有’‘做好了’然后 @我，"
             "应理解为 A07 已完成、详情见前面截图，不要再问‘什么做好了’或重复追问进度。"
@@ -115,12 +158,22 @@ class WorkEngine:
                 "不能因为出现问号、新问题或工作词就必回，先判断是否在和我说话。"
                 "不参与时 should_reply=false，reply 为空，不发送“这个与我无关”等解释。"
             )
+        schema = WORK_SCHEMA
+        if required_reply:
+            prompt += (
+                "\n本次有真实的 @我，闲聊模式下必须回应，此规则优先于结束语、少插话等不回复判断。"
+                "即使只有一个 @，也结合同一发送者前文自然回应，不当成无关闲聊。"
+                "should_reply 必须为 true，reply 必须有正文；没有其他上下文就简短说我在，不编造事项。"
+            )
+            schema = deepcopy(WORK_SCHEMA)
+            schema["properties"]["should_reply"]["enum"] = [True]
+            schema["properties"]["reply"]["minLength"] = 1
         async with self.runtime.model_slots:
             raw = await self.runtime.backend.run(
                 "work:" + session_key,
                 prompt,
                 image_paths=images,
-                response_schema=WORK_SCHEMA,
+                response_schema=schema,
             )
         result = json.loads(raw)
         if (
@@ -137,6 +190,11 @@ class WorkEngine:
         ):
             result["overview"] = ctx["overview"]
         reply = str(result.get("reply") or "").strip()
+        if required_reply:
+            result["should_reply"] = True
+            if not reply or reply == "[[NO_REPLY]]":
+                reply = "我在。"
+            result["reply"] = reply
         if not result["should_reply"]:
             reply = ""
             result["reply"] = ""

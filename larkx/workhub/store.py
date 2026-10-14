@@ -184,6 +184,14 @@ class HubStore:
     def group_reply_policy(self, chat_id):
         return self.setting("group_reply_policy:" + str(chat_id), "off")
 
+    def user_profiles(self, user_ids):
+        keys = ["user:" + str(user_id) for user_id in user_ids if user_id]
+        with self.storage.Session() as session:
+            return {
+                row.external_id: record(row)
+                for row in session.query(Persona).filter(Persona.key.in_(keys)).all()
+            }
+
     def update_persona(self, key, fields):
         with self.storage.Session() as s:
             row = s.get(Persona, key)
