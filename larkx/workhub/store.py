@@ -66,6 +66,48 @@ class HubStore:
         maximum = number("batch_max_wait", "LARKX_BATCH_MAX_WAIT", 5, 60)
         return {"batch_delay": delay, "batch_max_wait": max(delay, maximum)}
 
+    def human_pause_seconds(self):
+        try:
+            value = float(self.setting("human_pause_seconds", "120"))
+            return value if math.isfinite(value) and 0 <= value <= 86400 else 120.0
+        except (TypeError, ValueError):
+            return 120.0
+
+    def configure_human_pause(self, seconds):
+        if (
+            isinstance(seconds, bool)
+            or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds)
+            or not 0 <= seconds <= 86400
+        ):
+            raise ValueError("人工接管等待时间必须是 0 到 86400 秒之间的数字")
+        now = time.time()
+        with self.storage.Session() as session:
+            setting = session.get(Setting, "human_pause_seconds") or Setting(
+                key="human_pause_seconds"
+            )
+            setting.value = str(float(seconds))
+            session.add(setting)
+            for row in (
+                session.query(Setting)
+                .filter(Setting.key.startswith("human_pause:", autoescape=True))
+                .all()
+            ):
+                state = json.loads(row.value)
+                if state.get("until", 0) <= now:
+                    continue
+                # Old states stored only an expiry; recover their last activity.
+                last_activity = state.get(
+                    "last_activity", state["until"] - state.get("duration_seconds", 120)
+                )
+                state.update(
+                    last_activity=last_activity,
+                    duration_seconds=float(seconds),
+                    until=last_activity + seconds,
+                )
+                row.value = json.dumps(state)
+            session.commit()
+
     def handoff(self, chat_id):
         return json.loads(self.setting("human_pause:" + str(chat_id), "{}"))
 
@@ -79,7 +121,16 @@ class HubStore:
         if manual:
             state["last_manual"] = max(state.get("last_manual", 0), activity_at)
             state["generation"] = state.get("generation", 0) + 1
-        state["until"] = max(state.get("until", 0), activity_at + 120)
+        duration = self.human_pause_seconds()
+        state["last_activity"] = max(
+            state.get(
+                "last_activity",
+                state.get("until", 0) - state.get("duration_seconds", 120),
+            ),
+            activity_at,
+        )
+        state["duration_seconds"] = duration
+        state["until"] = state["last_activity"] + duration
         self.set_setting("human_pause:" + str(chat_id), json.dumps(state))
         return state
 

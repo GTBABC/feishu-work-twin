@@ -434,6 +434,15 @@ def create_app(runtime=None, start_bridge=True):
                 ):
                     raise ValueError(f"{key} 必须是 0.1 到 {upper} 秒之间的数字")
                 timing[key] = float(value)
+        if "human_pause_seconds" in fields:
+            value = fields["human_pause_seconds"]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 <= value <= 86400
+            ):
+                raise ValueError("人工接管等待时间必须是 0 到 86400 秒之间的数字")
         if timing["batch_max_wait"] < timing["batch_delay"]:
             raise ValueError("最长等待时间不能小于停顿时间")
         if "own_rules" in fields:
@@ -453,6 +462,8 @@ def create_app(runtime=None, start_bridge=True):
         for key in ("batch_delay", "batch_max_wait"):
             if key in fields:
                 r.hub.set_setting(key, str(timing[key]))
+        if "human_pause_seconds" in fields:
+            r.hub.configure_human_pause(fields["human_pause_seconds"])
         return r.status()
 
     @app.post("/api/control")

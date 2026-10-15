@@ -459,5 +459,6 @@ class HubRuntime:
             "last_analysis": self.last_analysis,
             "reply_suffix": self.hub.setting("reply_suffix", DEFAULT_SUFFIX),
             **self.hub.batch_timing(),
+            "human_pause_seconds": self.hub.human_pause_seconds(),
             "rules": "私聊自动处理；群聊默认不回复，可逐群选择闲聊模式、@我或@全体",
         }

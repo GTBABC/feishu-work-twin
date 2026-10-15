@@ -192,3 +192,83 @@ class ReplySettingsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["should_reply"])
         self.assertFalse(sent)
+
+    def test_human_pause_setting_persists_and_rejects_invalid_input(self):
+        with TestClient(create_app(self.runtime, start_bridge=False)) as client:
+            self.assertEqual(self.runtime.status()["human_pause_seconds"], 120)
+            response = client.patch(
+                "/api/settings",
+                headers={"X-Workhub": "1"},
+                json={"human_pause_seconds": 300},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["human_pause_seconds"], 300)
+            self.assertEqual(HubStore(self.storage).human_pause_seconds(), 300)
+            self.runtime.hub.set_setting("own_rules", "keep")
+            for value in [None, True, "60", -1, 86401]:
+                response = client.patch(
+                    "/api/settings",
+                    headers={"X-Workhub": "1"},
+                    json={"human_pause_seconds": value, "own_rules": "invalid change"},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(self.runtime.hub.setting("own_rules"), "keep")
+            response = client.patch(
+                "/api/settings",
+                headers={"X-Workhub": "1"},
+                json={"human_pause_seconds": 0},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["human_pause_seconds"], 0)
+
+    def test_configured_pause_rolls_with_activity_and_does_not_affect_other_chats(self):
+        h = self.runtime.hub
+        h.configure_human_pause(30)
+        with patch("larkx.workhub.store.time.time", return_value=1000):
+            h.touch_handoff("g", manual=True)
+            self.assertEqual(h.handoff("g")["until"], 1030)
+        with patch("larkx.workhub.store.time.time", return_value=1020):
+            h.touch_handoff("g", activity_at=1020)
+            self.assertEqual(h.handoff("g")["until"], 1050)
+            h.touch_handoff("other")
+            self.assertFalse(h.human_paused("other"))
+        with patch("larkx.workhub.store.time.time", return_value=1049):
+            self.assertTrue(HubStore(self.storage).human_paused("g"))
+        with patch("larkx.workhub.store.time.time", return_value=1051):
+            self.assertFalse(h.human_paused("g"))
+            h.touch_handoff("g")
+            self.assertFalse(h.human_paused("g"))
+
+    def test_changing_duration_recalculates_active_pauses_without_reviving_expired(
+        self,
+    ):
+        h = self.runtime.hub
+        with patch("larkx.workhub.store.time.time", return_value=1000):
+            h.touch_handoff("expired", manual=True)
+        with patch("larkx.workhub.store.time.time", return_value=1200):
+            h.touch_handoff("active", manual=True)
+        with patch("larkx.workhub.store.time.time", return_value=1210):
+            h.configure_human_pause(300)
+            self.assertEqual(h.handoff("active")["until"], 1500)
+            self.assertFalse(h.human_paused("expired"))
+            h.configure_human_pause(5)
+            self.assertEqual(h.handoff("active")["until"], 1205)
+            self.assertFalse(h.human_paused("active"))
+
+    def test_zero_duration_disables_pause_and_handles_legacy_states(self):
+        h = self.runtime.hub
+        h.set_setting(
+            "human_pause:g",
+            json.dumps({"until": 1120, "last_manual": 1000, "generation": 1}),
+        )
+        with patch("larkx.workhub.store.time.time", return_value=1010):
+            h.configure_human_pause(300)
+            self.assertEqual(h.handoff("g")["until"], 1300)
+            h.configure_human_pause(0)
+            self.assertFalse(h.human_paused("g"))
+            h.touch_handoff("g", manual=True)
+            self.assertFalse(h.human_paused("g"))
+            self.assertEqual(h.handoff("g")["generation"], 2)
+        for value in ["nan", "inf", "oops", "-1", "86401"]:
+            h.set_setting("human_pause_seconds", value)
+            self.assertEqual(h.human_pause_seconds(), 120)
