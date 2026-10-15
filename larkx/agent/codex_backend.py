@@ -15,6 +15,72 @@ from ..config import DATA_DIR
 from .backend import AgentBackend
 
 
+def failure_reason(stderr):
+    """Return a fixed safe message, never raw CLI output which can echo chats."""
+    lines = (stderr or b"").decode("utf-8", errors="replace").splitlines()
+    errors = [
+        line for line in lines if line.strip().lower().startswith(("error:", "error "))
+    ]
+    diagnostic = "\n".join(errors or lines[-20:]).lower()
+    if any(
+        word in diagnostic
+        for word in (
+            "context_length_exceeded",
+            "maximum context",
+            "context window",
+            "input too long",
+        )
+    ):
+        return "context", "对话上下文过长，需缩减历史后重试"
+    if any(
+        word in diagnostic
+        for word in ("invalid schema", "invalid_json_schema", "output schema")
+    ):
+        return "schema", "结构化回复格式不被模型接受"
+    if any(
+        word in diagnostic
+        for word in (
+            "model_not_found",
+            "model is not supported",
+            "model does not exist",
+            "not supported when using chatgpt",
+        )
+    ):
+        return "model", "当前账号不支持配置的模型，请检查模型名称"
+    if any(
+        word in diagnostic
+        for word in ("not logged in", "unauthorized", "token expired", "401")
+    ):
+        return "auth", "登录凭据失效或未被识别，请执行 codex login"
+    if any(
+        word in diagnostic
+        for word in (
+            "usage_limit",
+            "usage limit",
+            "rate limit",
+            "insufficient_quota",
+            "429",
+        )
+    ):
+        return "limit", "账号额度或请求频率受限，请稍后再试"
+    if any(
+        word in diagnostic
+        for word in (
+            "reconnecting",
+            "error sending request",
+            "failed to send request",
+            "stream disconnected",
+            "connection reset",
+            "connection refused",
+            "timed out",
+            "tls",
+            "network",
+        )
+    ):
+        return "network", "连接 ChatGPT 失败，请检查网络或代理，登录状态可能正常"
+    return "unknown", "调用未成功，原因未能安全识别；不一定是登录或模型问题"
+
+
 class CodexBackend(AgentBackend):
     name = "codex"
     returns_reply = True
@@ -79,7 +145,18 @@ class CodexBackend(AgentBackend):
             images.extend(item.get("images", []))
         images.extend(str(p) for p in image_paths)
         images = list(dict.fromkeys(p for p in images if Path(p).is_file()))[-3:]
-        context = [{"role": h["role"], "content": h["content"]} for h in history]
+        # Workhub already supplies a fresh full context snapshot. Replaying 20
+        # snapshots repeats the same conversations and can overflow model context.
+        context = []
+        if not response_schema:
+            size = 0
+            for item in reversed(history):
+                content = item.get("content") or ""
+                if size + len(content) > 40000:
+                    break
+                context.append({"role": item["role"], "content": content})
+                size += len(content)
+            context.reverse()
         request = (
             (
                 "你是工作数字人。严格按提供的 JSON Schema 输出分析和执行建议，不要输出 Markdown。"
@@ -114,6 +191,10 @@ class CodexBackend(AgentBackend):
                 "read-only",
                 "--disable",
                 "shell_tool",
+                "--disable",
+                "apps",
+                "--disable",
+                "plugins",
                 "-c",
                 f'model_reasoning_effort="{self.effort}"',
                 "--skip-git-repo-check",
@@ -132,30 +213,42 @@ class CodexBackend(AgentBackend):
                 args += ["--image", image_path]
             args.append("-")
             # Separate cwd avoids loading project instructions into chat replies.
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=temp,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _, stderr = await asyncio.wait_for(
-                    proc.communicate(request.encode("utf-8")), timeout=self.timeout
+            deadline = time.monotonic() + self.timeout
+            for attempt in range(2):
+                # A failed CLI must not leave a stale reply for a retry to consume.
+                output.unlink(missing_ok=True)
+                proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    cwd=temp,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                raise RuntimeError("Codex 生成回复超时，未发送消息")
-            except asyncio.CancelledError:
-                proc.kill()
-                await proc.communicate()
-                raise
-            if proc.returncode:
-                # CLI stderr may contain the prompt; do not echo it into logs.
-                raise RuntimeError(
-                    f"Codex 返回错误 {proc.returncode}，请检查 codex login status 和模型配置"
-                )
+                try:
+                    _, stderr = await asyncio.wait_for(
+                        proc.communicate(request.encode("utf-8")),
+                        timeout=max(0.01, deadline - time.monotonic()),
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.communicate()
+                    raise RuntimeError("Codex 生成回复超时，未发送消息")
+                except asyncio.CancelledError:
+                    proc.kill()
+                    await proc.communicate()
+                    raise
+                if not proc.returncode:
+                    break
+                category, reason = failure_reason(stderr)
+                if (
+                    category == "network"
+                    and attempt == 0
+                    and deadline - time.monotonic() > 3
+                ):
+                    logger.warning("Codex 网络调用失败，重试一次（尚未发送飞书消息）")
+                    await asyncio.sleep(1)
+                    continue
+                raise RuntimeError(f"Codex 返回错误 {proc.returncode}：{reason}")
             if not output.exists():
                 raise RuntimeError("Codex 未生成回复文件，未发送消息")
             reply = output.read_text(encoding="utf-8").strip()
@@ -168,7 +261,10 @@ class CodexBackend(AgentBackend):
             history.append({"role": "assistant", "content": reply})
         pending = path.with_suffix(".tmp")
         pending.write_text(
-            json.dumps(history[-20:], ensure_ascii=False), encoding="utf-8"
+            json.dumps(
+                history[-2:] if response_schema else history[-20:], ensure_ascii=False
+            ),
+            encoding="utf-8",
         )
         pending.replace(path)
         logger.info(

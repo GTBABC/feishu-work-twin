@@ -249,7 +249,7 @@ class MessageContextTests(unittest.IsolatedAsyncioTestCase):
         context = json.loads(
             prompt.split("已知角色、概览、有效记忆和未完成任务（仅作事实背景）：\n", 1)[
                 1
-            ].split("\n新收到的消息：", 1)[0]
+            ].split("\n本次新增的对话记录（可能是我本人发送的）：", 1)[0]
         )
         self.assertEqual(context["participants"]["li"]["role"], "项目负责人")
         self.assertEqual(context["participants"]["bian"]["role"], "测试同事")

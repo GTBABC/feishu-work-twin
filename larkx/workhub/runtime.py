@@ -84,7 +84,7 @@ class HubRuntime:
             self.dispatcher
             and not self.dispatcher.should_handle(msg, self.client.auth.user_id)
         ):
-            key = str(msg["chat_id"])
+            key = (str(msg["chat_id"]), msg.get("anchor") or "")
             self.observations.setdefault(key, []).append(
                 dict(msg, _chat_name=chat_name, _sender_name=sender_name)
             )
@@ -102,7 +102,8 @@ class HubRuntime:
                 {
                     "title": "会话分析异常",
                     "details": str(e),
-                    "chat_id": key,
+                    "chat_id": key[0],
+                    "anchor": key[1],
                     "priority": "high",
                 }
             )
@@ -126,7 +127,7 @@ class HubRuntime:
                         )
                 except Exception:
                     pass
-        last = batch[-1]
+        last = dict(batch[-1], _batch=batch)
         return await self.engine.process(
             "overview:" + str(last["chat_id"]),
             last,

@@ -266,7 +266,9 @@ class HubStore:
             tasks = (
                 s.query(Task)
                 .filter(Task.chat_id == str(chat_id), Task.status != "done")
-                .limit(20)
+                .filter(Task.anchor == anchor if anchor is not None else True)
+                .order_by(Task.id)
+                .limit(100)
                 .all()
             )
             recent_query = s.query(Message).filter_by(chat_id=str(chat_id))
@@ -426,9 +428,39 @@ class HubStore:
                 s.delete(r)
                 s.commit()
 
-    def apply_analysis(self, msg, analysis):
+    def apply_analysis(self, msg, analysis, allowed_task_ids=None):
         chat_id = str(msg["chat_id"])
+        anchor = msg.get("anchor") or ""
+        sources = [str(m.get("msg_id") or "") for m in msg.get("_batch") or [msg]]
+        marker = (
+            "analysis:"
+            + hashlib.sha256(
+                json.dumps([chat_id, anchor, sources]).encode()
+            ).hexdigest()
+        )
         with self.storage.Session() as s:
+            # Replayed events must not recreate tasks, even after manual completion.
+            if all(sources) and s.get(Setting, marker):
+                return
+
+            def existing_task(task_id):
+                if (
+                    not isinstance(task_id, int)
+                    or isinstance(task_id, bool)
+                    or task_id < 0
+                ):
+                    raise ValueError("AI 返回了无效的任务编号")
+                if task_id == 0:
+                    return None
+                if allowed_task_ids is not None and task_id not in allowed_task_ids:
+                    raise ValueError("AI 关联的任务不在本次上下文中")
+                row = s.get(Task, task_id)
+                if not row or row.chat_id != chat_id or (row.anchor or "") != anchor:
+                    raise ValueError("AI 关联的任务不属于当前会话/话题")
+                return row
+
+            attention_id = analysis.get("attention_task_id", 0)
+            attention_task = existing_task(attention_id)
             convo = s.get(Conversation, chat_id)
             if convo and analysis.get("overview"):
                 convo.overview = analysis["overview"][:6000]
@@ -447,14 +479,20 @@ class HubStore:
                             source_msg_id=str(msg.get("msg_id") or ""),
                         )
                     )
-            tasks = list(analysis.get("tasks", []))[:10]
+            tasks = [dict(task) for task in analysis.get("tasks", [])[:10]]
             if analysis.get("needs_attention"):
-                if tasks:
-                    tasks[0] = dict(
-                        tasks[0],
-                        status="needs_attention",
-                        draft_reply=analysis.get("reply", ""),
-                    )
+                if attention_task is not None:
+                    # A human may have completed it during generation; never reopen it.
+                    if attention_task.status != "done":
+                        tasks.append(
+                            {
+                                "task_id": attention_id,
+                                "details": analysis.get("attention_reason") or "",
+                            }
+                        )
+                elif tasks:
+                    tasks[0]["status"] = "needs_attention"
+                    tasks[0]["draft_reply"] = analysis.get("reply", "")
                     tasks[0]["details"] = (
                         (tasks[0].get("details") or "")
                         + "\n需要你确认："
@@ -466,31 +504,45 @@ class HubStore:
                             "title": "需要你处理："
                             + (analysis.get("attention_reason") or "待确认")[:160],
                             "details": analysis.get("attention_reason") or "",
-                            "priority": "high",
                             "status": "needs_attention",
+                            "priority": "high",
                             "draft_reply": analysis.get("reply", ""),
                         }
                     )
             for task in tasks:
+                row = existing_task(task.get("task_id", 0))
                 title = str(task.get("title") or "").strip()[:256]
-                if not title:
-                    continue
-                if (
-                    s.query(Task)
-                    .filter(
-                        Task.chat_id == chat_id,
-                        Task.title == title,
-                        Task.status != "done",
+                if row is None and title and "task_id" not in task:
+                    row = (
+                        s.query(Task)
+                        .filter(
+                            Task.chat_id == chat_id,
+                            Task.anchor == anchor,
+                            Task.title == title,
+                            Task.status != "done",
+                        )
+                        .first()
                     )
-                    .first()
-                ):
+                if row is not None:
+                    if row.status == "done":
+                        continue
+                    # Preserve owner-edited title/status/dates/draft; append evidence only.
+                    detail = str(task.get("details") or "").strip()
+                    if detail and detail not in (row.details or ""):
+                        addition = (
+                            "\n\n补充（消息 " + ", ".join(sources) + "）：\n" + detail
+                        )
+                        row.details = ((row.details or "") + addition)[:6000]
+                    row.updated_at = datetime.now()
+                    continue
+                if not title:
                     continue
                 s.add(
                     Task(
                         title=title,
                         details=str(task.get("details") or "")[:6000],
                         chat_id=chat_id,
-                        anchor=msg.get("anchor") or "",
+                        anchor=anchor,
                         origin_msg_id=str(msg.get("msg_id") or ""),
                         priority=task.get("priority")
                         if task.get("priority") in ("low", "normal", "high")
@@ -500,6 +552,10 @@ class HubStore:
                         draft_reply=task.get("draft_reply") or "",
                     )
                 )
+                # Make new rows visible to later entries in this same analysis.
+                s.flush()
+            if all(sources):
+                s.add(Setting(key=marker, value="processed"))
             s.commit()
 
     def tasks(self):
