@@ -13,7 +13,7 @@ class Persona(Base):
     role = Column(String(256), default="")
     description = Column(Text, default="")
     reply_style = Column(Text, default="")
-    mode = Column(String(12), default="auto")
+    mode = Column(String(12), default="inherit")
     updated_at = Column(DateTime, default=datetime.now)
 
 
@@ -81,3 +81,43 @@ class Job(Base):
     result = Column(Text, default="")
     error = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.now)
+
+
+class TaskArchive(Base):
+    __tablename__ = "hub_task_archives"
+    task_id = Column(Integer, primary_key=True)
+    reason = Column(String(40), nullable=False)
+    snapshot = Column(Text, nullable=False)
+    archived_at = Column(DateTime, default=datetime.now)
+
+
+class ReplyDraft(Base):
+    __tablename__ = "hub_reply_drafts"
+    key = Column(String(64), primary_key=True)
+    chat_id = Column(String(40), index=True)
+    anchor = Column(String(40), default="")
+    source_msg_id = Column(String(80), default="")
+    content = Column(Text, default="")
+    status = Column(String(20), default="pending")
+    updated_at = Column(DateTime, default=datetime.now)
+
+
+class Incident(Base):
+    __tablename__ = "hub_incidents"
+    key = Column(String(64), primary_key=True)
+    provider = Column(String(80), index=True)
+    category = Column(String(40))
+    scope = Column(String(100))
+    action_id = Column(Integer)
+    occurrences = Column(Integer, default=0)
+    first_seen = Column(DateTime, default=datetime.now)
+    last_seen = Column(DateTime, default=datetime.now)
+
+
+def record(row):
+    return {
+        c.name: getattr(row, c.name).isoformat()
+        if isinstance(getattr(row, c.name), datetime)
+        else getattr(row, c.name)
+        for c in row.__table__.columns
+    }

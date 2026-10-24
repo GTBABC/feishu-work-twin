@@ -8,6 +8,7 @@ from loguru import logger
 from .auth import LarkAuth
 from .config import load_config
 from .region import get_region
+from .settings import resolve_settings
 
 
 def message_resource_url(msg_id: str, key: str, chat_id: str, host: str = None) -> str:
@@ -155,10 +156,11 @@ def display_parts(msg_type, data):
     return parts
 
 
-def image_messages(msg):
+def image_messages(msg, limit=None):
     """Return each image in a post in the same shape as a standalone image."""
+    limit = resolve_settings()[0]["model_image_limit"] if limit is None else limit
     if msg.get("msg_type") == 5:
-        return [msg]
+        return [msg] if limit else []
     if msg.get("msg_type") != 2:
         return []
     images = []
@@ -171,4 +173,4 @@ def image_messages(msg):
                     content_data={"image": {"origin": {"key": part["key"]}}},
                 )
             )
-    return images[:3]
+    return images[:limit]

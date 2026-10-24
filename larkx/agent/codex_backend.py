@@ -12,7 +12,9 @@ from pathlib import Path
 from loguru import logger
 
 from ..config import DATA_DIR
-from .backend import AgentBackend
+from .backend import AgentBackend, hidden_process_options
+from .context import bounded_text, context_budget
+from ..settings import resolve_settings
 
 
 def failure_reason(stderr):
@@ -85,18 +87,19 @@ class CodexBackend(AgentBackend):
     name = "codex"
     returns_reply = True
 
-    def __init__(self):
-        self.executable = os.environ.get("LARKX_CODEX_PATH") or shutil.which("codex")
+    def __init__(self, executable=None):
+        self.executable = (
+            executable or os.environ.get("LARKX_CODEX_PATH") or shutil.which("codex")
+        )
         if not self.executable:
             raise RuntimeError("未找到 Codex CLI，请先安装并执行 codex login")
         self.history_dir = DATA_DIR / "codex_history"
         self.history_dir.mkdir(parents=True, exist_ok=True)
-        self.timeout = int(os.environ.get("LARKX_CODEX_TIMEOUT", "180"))
-        self.model = os.environ.get("LARKX_CODEX_MODEL", "").strip()
-        self.effort = os.environ.get("LARKX_CODEX_REASONING_EFFORT", "low")
+        initial = resolve_settings()[0]
+        self.timeout = initial["codex_timeout"]
+        self.model = initial["codex_model"]
+        self.effort = initial["codex_reasoning_effort"]
         self.session_locks = {}
-        if self.effort not in ("minimal", "low", "medium", "high", "xhigh"):
-            raise ValueError("LARKX_CODEX_REASONING_EFFORT 配置无效")
 
     def _path(self, key):
         return self.history_dir / (hashlib.sha256(key.encode()).hexdigest() + ".json")
@@ -113,51 +116,64 @@ class CodexBackend(AgentBackend):
         require_reply=False,
         image_paths=(),
         response_schema=None,
+        history_text=None,
+        settings=None,
     ):
         lock = self.session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
             return await self._run(
                 session_key,
                 prompt,
-                chat_id,
-                anchor,
                 require_reply,
                 image_paths,
                 response_schema,
+                history_text,
+                settings,
             )
 
     async def _run(
         self,
         session_key,
         prompt,
-        chat_id="",
-        anchor="",
         require_reply=False,
         image_paths=(),
         response_schema=None,
+        history_text=None,
+        settings=None,
     ):
         started = time.monotonic()
+        settings = resolve_settings()[0] if settings is None else settings
         path = self._path(session_key)
         history = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        # Structured analysis supplies its own context. Only an explicit short
+        # history_text opts structured callers (the owner console) into history.
+        remember = not response_schema or history_text is not None
         # Keep recent images available for follow-up questions in this conversation.
         images = []
+        image_window = (
+            settings["image_reference_seconds"]
+            if any(word in prompt for word in ("截图", "图片", "上面", "照片"))
+            else settings["image_lookback_seconds"]
+        )
         for item in history[-6:]:
-            images.extend(item.get("images", []))
+            for name in item.get("images", []):
+                candidate = Path(name)
+                if (
+                    candidate.is_file()
+                    and image_window
+                    and time.time() - item.get("image_time", candidate.stat().st_mtime)
+                    <= image_window
+                ):
+                    images.append(name)
         images.extend(str(p) for p in image_paths)
-        images = list(dict.fromkeys(p for p in images if Path(p).is_file()))[-3:]
-        # Workhub already supplies a fresh full context snapshot. Replaying 20
-        # snapshots repeats the same conversations and can overflow model context.
-        context = []
-        if not response_schema:
-            size = 0
-            for item in reversed(history):
-                content = item.get("content") or ""
-                if size + len(content) > 40000:
-                    break
-                context.append({"role": item["role"], "content": content})
-                size += len(content)
-            context.reverse()
-        request = (
+        image_limit = settings["model_image_limit"]
+        images = (
+            list(dict.fromkeys(p for p in images if Path(p).is_file()))[-image_limit:]
+            if image_limit
+            else []
+        )
+        budget = context_budget(settings)
+        prefix = (
             (
                 "你是工作数字人。严格按提供的 JSON Schema 输出分析和执行建议，不要输出 Markdown。"
                 if response_schema
@@ -175,6 +191,33 @@ class CodexBackend(AgentBackend):
             + time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + 8 * 3600))
             + "。\n"
             + ("已附上此会话近期的图片，请直接查看图片内容后回答。\n" if images else "")
+        )
+        if len(prefix) + len(prompt) + 100 > budget:
+            raise ValueError(
+                "当前输入与规则超过上下文预算，请拆分输入或提高 LARKX_CONTEXT_BUDGET"
+            )
+        turns = settings["control_history_turns"]
+        history_budget = min(
+            settings["control_history_chars"], budget - len(prefix) - len(prompt) - 100
+        )
+        context = []
+        if remember and turns:
+            for entry in reversed(history[-turns * 2 :]):
+                if response_schema and not entry.get("compact"):
+                    continue  # Do not replay legacy full structured prompts.
+                if (
+                    not entry.get("compact")
+                    and len(entry.get("content") or "") > history_budget
+                ):
+                    continue
+                content = bounded_text(entry.get("content"), min(2000, history_budget))
+                if not content:
+                    continue
+                candidate = [{"role": entry["role"], "content": content}] + context
+                if len(json.dumps(candidate, ensure_ascii=False)) <= history_budget:
+                    context = candidate
+        request = (
+            prefix
             + "此前的对话（JSON）:\n"
             + json.dumps(context, ensure_ascii=False)
             + "\n当前消息及回复要求:\n"
@@ -196,15 +239,15 @@ class CodexBackend(AgentBackend):
                 "--disable",
                 "plugins",
                 "-c",
-                f'model_reasoning_effort="{self.effort}"',
+                f'model_reasoning_effort="{settings["codex_reasoning_effort"]}"',
                 "--skip-git-repo-check",
                 "--color",
                 "never",
                 "--output-last-message",
                 str(output),
             ]
-            if self.model:
-                args += ["--model", self.model]
+            if settings["codex_model"]:
+                args += ["--model", settings["codex_model"]]
             if response_schema:
                 schema_file = Path(temp) / "schema.json"
                 schema_file.write_text(json.dumps(response_schema), encoding="utf-8")
@@ -213,8 +256,8 @@ class CodexBackend(AgentBackend):
                 args += ["--image", image_path]
             args.append("-")
             # Separate cwd avoids loading project instructions into chat replies.
-            deadline = time.monotonic() + self.timeout
-            for attempt in range(2):
+            deadline = time.monotonic() + settings["codex_timeout"]
+            for attempt in range(settings["network_retries"] + 1):
                 # A failed CLI must not leave a stale reply for a retry to consume.
                 output.unlink(missing_ok=True)
                 proc = await asyncio.create_subprocess_exec(
@@ -223,6 +266,7 @@ class CodexBackend(AgentBackend):
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
+                    **hidden_process_options(),
                 )
                 try:
                     _, stderr = await asyncio.wait_for(
@@ -242,11 +286,11 @@ class CodexBackend(AgentBackend):
                 category, reason = failure_reason(stderr)
                 if (
                     category == "network"
-                    and attempt == 0
-                    and deadline - time.monotonic() > 3
+                    and attempt < settings["network_retries"]
+                    and deadline - time.monotonic() > settings["retry_delay"] + 2
                 ):
-                    logger.warning("Codex 网络调用失败，重试一次（尚未发送飞书消息）")
-                    await asyncio.sleep(1)
+                    logger.warning("Codex 网络调用失败，准备重试（尚未发送飞书消息）")
+                    await asyncio.sleep(settings["retry_delay"])
                     continue
                 raise RuntimeError(f"Codex 返回错误 {proc.returncode}：{reason}")
             if not output.exists():
@@ -254,19 +298,65 @@ class CodexBackend(AgentBackend):
             reply = output.read_text(encoding="utf-8").strip()
         if require_reply and (not reply or reply == "[[NO_REPLY]]"):
             reply = "收到啦，有什么需要我帮忙的吗？"
-        history.append(
-            {"role": "user", "content": prompt, "images": list(map(str, image_paths))}
-        )
-        if reply and reply != "[[NO_REPLY]]":
-            history.append({"role": "assistant", "content": reply})
-        pending = path.with_suffix(".tmp")
-        pending.write_text(
-            json.dumps(
-                history[-2:] if response_schema else history[-20:], ensure_ascii=False
-            ),
-            encoding="utf-8",
-        )
-        pending.replace(path)
+        if remember and turns:
+            history = [
+                {
+                    "role": entry.get("role", "user"),
+                    "content": bounded_text(entry.get("content"), 2000)
+                    if entry.get("compact") or not response_schema
+                    else "",
+                    "images": entry.get("images", []),
+                    "image_time": entry.get("image_time", 0),
+                    "compact": True,
+                }
+                for entry in (history[-(turns * 2 - 2) :] if turns > 1 else [])
+            ]
+            history.append(
+                {
+                    "role": "user",
+                    "content": bounded_text(
+                        history_text if history_text is not None else prompt, 2000
+                    ),
+                    "images": list(map(str, image_paths)),
+                    "image_time": time.time(),
+                    "compact": True,
+                }
+            )
+            saved_reply = reply
+            if response_schema:
+                try:
+                    result = json.loads(reply)
+                    saved_reply = result.get("answer") or result.get("reply") or ""
+                except (ValueError, AttributeError):
+                    saved_reply = ""
+            if saved_reply and saved_reply != "[[NO_REPLY]]":
+                history.append(
+                    {
+                        "role": "assistant",
+                        "content": bounded_text(saved_reply, 2000),
+                        "compact": True,
+                    }
+                )
+            history = history[-turns * 2 :]
+        elif remember:
+            history = []
+        else:
+            # Keep only image metadata for the same six-entry lookback used above.
+            history = [
+                {key: entry[key] for key in ("images", "image_time") if key in entry}
+                for entry in history[-5:]
+            ]
+            history.append(
+                {"images": list(map(str, image_paths)), "image_time": time.time()}
+            )
+        if remember or any(entry.get("images") for entry in history):
+            pending = path.with_suffix(".tmp")
+            pending.write_text(
+                json.dumps(history, ensure_ascii=False), encoding="utf-8"
+            )
+            pending.replace(path)
+        else:
+            path.unlink(missing_ok=True)
         logger.info(
             f"Codex 已处理会话 [{session_key}] 耗时={time.monotonic() - started:.1f}s 图片={len(images)}"
         )

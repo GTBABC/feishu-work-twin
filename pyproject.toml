@@ -8,6 +8,8 @@ version = "2.0.0"
 description = "飞书网页版消息通道 + 本地 coding agent 接入"
 requires-python = ">=3.11"
 dependencies = [
+    "cryptography>=44",
+    "jsonschema>=4.23",
     "loguru==0.7.3",
     "requests==2.31.0",
     "websockets==15.0.1",

@@ -22,6 +22,9 @@ ANALYSIS = {
             "details": "整理上线安排",
             "priority": "high",
             "due_at": "",
+            "assignee": "self",
+            "action_required": True,
+            "evidence_ids": ["m1"],
         }
     ],
     "needs_attention": False,
@@ -35,7 +38,17 @@ class FakeBackend:
 
     async def run(self, *args, **kwargs):
         self.prompt = args[1]
-        return json.dumps(ANALYSIS, ensure_ascii=False)
+        result = json.loads(json.dumps(ANALYSIS))
+        schema = kwargs.get("response_schema", {})
+        items = schema.get("properties", {}).get("tasks", {}).get("items", {})
+        ids = (
+            items.get("properties", {})
+            .get("evidence_ids", {})
+            .get("items", {})
+            .get("enum", ["m1"])
+        )
+        result["tasks"][0]["evidence_ids"] = ids[:1]
+        return json.dumps(result, ensure_ascii=False)
 
 
 class HubTests(unittest.IsolatedAsyncioTestCase):
@@ -44,6 +57,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.storage = Storage("sqlite:///" + str(Path(self.temp.name) / "test.db"))
         self.backend = FakeBackend()
         self.runtime = HubRuntime(self.storage, self.backend)
+        self.runtime.hub.update_settings({"default_private_reply": "auto"})
         self.msg = {
             "msg_id": "m1",
             "chat_id": "c1",
@@ -98,7 +112,12 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.fail("draft must not send")
 
         await self.runtime.engine.process("c1:", self.msg, "message", [], send)
-        self.assertTrue(any(t["draft_reply"] for t in self.runtime.hub.tasks()))
+        self.assertEqual(
+            self.runtime.hub.reply_draft("c1")["content"], ANALYSIS["reply"]
+        )
+        self.assertFalse(
+            any(t["title"].startswith("审核回复") for t in self.runtime.hub.tasks())
+        )
 
     async def test_send_idempotency_and_uncertain_result(self):
         calls = []
@@ -119,7 +138,8 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.client.send_msg = lambda *args: None
         c = await self.runtime.send("c1", "不确定", "request-2")
         self.assertEqual(c["status"], "uncertain")
-        self.assertTrue(any("核对消息" in t["title"] for t in self.runtime.hub.tasks()))
+        self.assertFalse(self.runtime.hub.tasks())
+        self.assertEqual(self.runtime.hub.uncertain_send_count(), 1)
 
     async def test_restart_does_not_replay_pending_sends(self):
         self.runtime.hub.claim_send("crash-request", "c1", "message")
@@ -392,12 +412,29 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_person_does_not_reply_in_enabled_group(self):
         msg = {**self.msg, "chat_id": "g1", "chat_type": 2}
         self.runtime.hub.observe(msg, "测试群", "测试同事")
-        self.runtime.hub.update_persona("user:u1", {"mode": "off"})
+        second = {**msg, "msg_id": "m2", "from_id": "u2"}
+        self.runtime.hub.observe(second, "测试群", "另一同事")
+        self.runtime.hub.update_persona("group:g1", {"group_reply_policy": "all"})
+
+        async def generate(*args, **kwargs):
+            self.runtime.hub.update_persona("user:u1", {"mode": "off"})
+            return json.dumps(ANALYSIS)
+
+        self.runtime.backend.run = generate
 
         async def no_reply(*args):
             self.fail("disabled person must not get automatic group replies")
 
-        await self.runtime.engine.process("g1:", msg, "@我 请求", [], no_reply)
+        for batch in ([msg], [msg, second]):
+            with self.subTest(senders=[m["from_id"] for m in batch]):
+                self.runtime.hub.update_persona("user:u1", {"mode": "auto"})
+                with patch.object(
+                    self.runtime.hub, "context", wraps=self.runtime.hub.context
+                ) as context:
+                    await self.runtime.engine.process(
+                        "g1:", dict(batch[-1], _batch=batch), "请求", [], no_reply
+                    )
+                self.assertEqual(context.call_count, 2)
 
 
 class ApiTests(unittest.TestCase):

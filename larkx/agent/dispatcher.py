@@ -1,11 +1,11 @@
 import asyncio
-import os
 from datetime import datetime
 from xml.sax.saxutils import escape, quoteattr
 
 from loguru import logger
 
 from ..config import load_config
+from ..settings import resolve_settings
 
 INSTRUCTIONS = "以上是飞书会话里新到的一条消息(XML 里有会话/发送者/内容)。你是这个数字人,完整对话历史你都有。如果对方也是机器人且只是互相客套寒暄,直接结束不要再接话。"
 OUTPUT_RULES = "不需要回复就直接结束,不要解释、不要复述消息。"
@@ -22,7 +22,7 @@ def _ts(msg: dict) -> str:
 
 
 def build_xml_message(m: dict) -> str:
-    lines = [f'<message id={quoteattr(str(m.get("msg_id") or ""))}>']
+    lines = [f"<message id={quoteattr(str(m.get('msg_id') or ''))}>"]
     lines.append(
         f"  <chat id={quoteattr(str(m.get('chat_id')))} name={quoteattr(str(m.get('_chat_name') or ''))} type={quoteattr(str(m.get('chat_type_name') or ''))} anchor={quoteattr(str(m.get('anchor') or ''))}/>"
     )
@@ -48,21 +48,15 @@ class SessionWorker:
     async def collect_batch(self, first):
         # Wait for a quiet interval, not a fixed interval after the first sentence.
         workflow = getattr(self.dispatcher, "workflow", None)
-        if workflow:
-            timing = workflow.runtime.hub.batch_timing()
-            delay, maximum = timing["batch_delay"], timing["batch_max_wait"]
-        else:
-            delay = max(
-                0.01, min(float(os.environ.get("LARKX_BATCH_DELAY", "1.5")), 30)
-            )
-            maximum = max(
-                delay, min(float(os.environ.get("LARKX_BATCH_MAX_WAIT", "5")), 60)
-            )
+        settings = (
+            workflow.runtime.hub.settings() if workflow else resolve_settings()[0]
+        )
+        delay, maximum = settings["batch_delay"], settings["batch_max_wait"]
         deadline = asyncio.get_running_loop().time() + maximum
         batch = [first]
         self.collecting = True
         try:
-            while len(batch) < 20:
+            while len(batch) < settings["batch_size"]:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     break
@@ -91,18 +85,7 @@ class SessionWorker:
                 logger.error(f"处理消息异常 [{self.session_key}]: {e}")
                 workflow = getattr(self.dispatcher, "workflow", None)
                 if workflow:
-                    task = workflow.runtime.hub.create_task(
-                        {
-                            "title": "自动处理异常："
-                            + (msg.get("_chat_name") or self.session_key),
-                            "details": str(e),
-                            "chat_id": str(msg.get("chat_id") or ""),
-                            "priority": "high",
-                        }
-                    )
-                    workflow.runtime.hub.update_task(
-                        task["id"], {"status": "needs_attention"}
-                    )
+                    workflow.runtime.report_processing_error(e, msg, "reply")
 
 
 class AgentDispatcher:
@@ -276,16 +259,22 @@ class AgentDispatcher:
                     + body
                 )
         image_paths = []
-        if self.backend.returns_reply and self.image_prepare:
+        settings = (
+            self.workflow.runtime.hub.settings()
+            if self.workflow
+            else resolve_settings()[0]
+        )
+        image_limit = settings["model_image_limit"]
+        if self.backend.returns_reply and self.image_prepare and image_limit:
             # Include images immediately preceding a standalone @mention too.
             latest_time = float(msg.get("create_time") or 0)
             if latest_time > 100000000000:
                 latest_time /= 1000
             preceding_images = []
             image_window = (
-                1800
+                settings["image_reference_seconds"]
                 if any(word in body for word in ("截图", "图片", "上面", "照片"))
-                else 180
+                else settings["image_lookback_seconds"]
             )
             for item in context:
                 timestamp = float(item.get("create_time") or 0)
@@ -294,7 +283,7 @@ class AgentDispatcher:
                 if latest_time and 0 <= latest_time - timestamp <= image_window:
                     preceding_images.append(item)
             for item in batch + list(reversed(preceding_images)):
-                if len(image_paths) >= 3:
+                if len(image_paths) >= image_limit:
                     break
                 if item.get("msg_type") in (2, 5):
                     try:
@@ -307,11 +296,14 @@ class AgentDispatcher:
                             f"图片下载失败 [{session_key}]: {type(e).__name__}"
                         )
                         body += "\n此条图片下载失败，无法查看；请明确说明并请对方重发，不要猜测。"
-            image_paths = image_paths[:3]
+            image_paths = image_paths[:image_limit]
         chat_id = str(msg["chat_id"])
         root_id = (msg.get("anchor") or "") or None
         reply_cmd = f'lark send {chat_id} "<回复内容>"'
         if self.workflow:
+            msg = dict(
+                msg, _context_message_ids=[str(m.get("msg_id") or "") for m in context]
+            )
             await self.workflow.process(
                 session_key, msg, body, image_paths, self.reply_fn
             )

@@ -12,6 +12,7 @@ jobs:
     env:
       PYTHONUTF8: '1'
       LARKX_HOME: work/ci-data
+      LARKX_STARTUP_PATH: work/ci-startup.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
@@ -20,6 +21,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --group dev
       - run: uv run --no-sync python -m unittest discover -s tests -v
-      - run: uv run --no-sync ruff check larkx/workhub larkx/agent/codex_backend.py larkx/media.py tests --select F
+      - run: uv run --no-sync ruff check larkx/workhub larkx/agent/codex_backend.py larkx/agent/model_backend.py larkx/agent/model_connections.py larkx/agent/context.py larkx/agent/dispatcher.py larkx/settings.py larkx/startup.py larkx/secrets.py larkx/media.py tests --select F
       - run: node --check larkx/workhub/static/app.js
+      - run: node --test tests/test_web_sync.cjs tests/test_settings_ui.cjs
       - run: uv build

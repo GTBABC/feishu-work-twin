@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的工作数字人 · 工作台</title><link rel="stylesheet" href="/static/style.css?v=group-policy-1"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的工作数字人 · 工作台</title><link rel="stylesheet" href="/static/style.css?v=adaptive-pages"></head>
 <body>
 <aside class="sidebar">
   <a class="brand" href="/" aria-label="工作数字人首页"><span class="brand-mark">w<span class="brand-dot">.</span></span><div>工作数字人</div></a>
@@ -11,7 +11,7 @@
 </aside>
 <main>
   <header class="topbar"><span id="breadcrumb">工作台</span><div><span id="date"></span><button class="icon-button" id="refresh" title="刷新" aria-label="刷新">↻</button></div></header>
-  <div class="page-head"><div><h1 id="pageTitle">工作台</h1></div><button class="button secondary" id="toggleAutomation">暂停自动回复</button></div>
+  <div class="page-head"><div><h1 id="pageTitle">工作台</h1></div></div>
   <section class="stats" id="stats"></section>
   <div class="content-layout">
     <div id="mainView"></div>
@@ -25,7 +25,12 @@
     </aside>
 
 <dialog id="taskDialog"><div class="dialog-head"><div><h2 id="taskTitle"></h2></div><button class="icon-button" data-close>×</button></div><div id="taskDetail"></div><div class="row-flex"><label>任务状态<select id="taskStatus"><option value="open">待处理</option><option value="in_progress">进行中</option><option value="needs_attention">需要你决定</option><option value="done">已完成</option></select></label><label>优先级<select id="taskPriority"><option value="low">稍后处理</option><option value="normal">普通</option><option value="high">优先处理</option></select></label><button class="button secondary" id="taskSave">保存状态</button></div><form id="taskReplyForm"><label>回复对应会话<textarea id="taskReply" rows="4" placeholder="输入回复"></textarea></label><label>润色要求（可选）<input id="taskPolishInstruction" placeholder="例如：更简短、语气委婉一点、明确下一步"></label><div class="row-flex" style="margin-top:12px"><span class="subtle" id="taskPolishHint"></span><button type="button" class="button secondary" id="taskPolish">✳ AI 润色 / 起草</button></div><p class="subtle" id="taskSuffixPreview"></p><div class="dialog-actions"><button type="button" class="button secondary" id="taskDone">标记完成</button><button class="button primary" id="taskSendButton" type="submit">发送回复 ↗</button></div></form></dialog>
-<dialog id="newTaskDialog"><div class="dialog-head"><h2>添加待办</h2><button class="icon-button" data-close>×</button></div><form id="newTaskForm"><label>任务标题<input id="newTaskTitle" required maxlength="256" placeholder="需要处理什么？"></label><label>详情<textarea id="newTaskDetails" rows="3"></textarea></label><label>关联会话<select id="newTaskChat"></select></label><div class="dialog-actions"><button class="button primary" type="submit">添加到工作台</button></div></form></dialog>
+<dialog id="newTaskDialog"><div class="dialog-head"><h2>添加待办</h2><button class="icon-button" data-close>×</button></div><form id="newTaskForm"><label>任务标题<input id="newTaskTitle" required maxlength="256" placeholder="需要处理什么？"></label><label>详情<textarea id="newTaskDetails" rows="3"></textarea></label><label>搜索关联会话<input id="newTaskChatSearch" placeholder="输入联系人或群聊名称" maxlength="200"></label><label>关联会话<select id="newTaskChat"></select></label><div class="dialog-actions"><button class="button primary" type="submit">添加到工作台</button></div></form></dialog>
 <div id="toast" role="status"></div>
-<script src="/static/app.js?v=chat-timing-1"></script>
+<dialog id="listDetailDialog" class="detail-drawer"><div class="dialog-head"><h2 id="listDetailTitle"></h2><button class="icon-button" data-close aria-label="关闭详情">×</button></div><div id="listDetailBody"></div></dialog>
+<script src="/static/sync.js?v=storage-fields"></script>
+<script src="/static/settings.js?v=adaptive-pages"></script>
+<script src="/static/models.js?v=storage-fields"></script>
+<script src="/static/paging.js?v=adaptive-pages"></script>
+<script src="/static/app.js?v=adaptive-pages"></script>
 </body></html>

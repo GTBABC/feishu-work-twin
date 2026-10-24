@@ -151,7 +151,9 @@ class TaskFollowupTests(unittest.IsolatedAsyncioTestCase):
             if len(calls) == 1:
                 entered.set()
                 await release.wait()
-                return json.dumps(self.analysis(needs_attention=True))
+                data = self.analysis(needs_attention=True)
+                data["tasks"][0]["evidence_ids"] = ["first"]
+                return json.dumps(data)
             task = self.hub.tasks()[0]
             self.assertIn('"id": ' + str(task["id"]), args[1])
             enums = kwargs["response_schema"]["properties"]["attention_task_id"]["enum"]

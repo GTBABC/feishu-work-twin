@@ -3,8 +3,8 @@ revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 
@@ -558,7 +558,9 @@ name = "larkx"
 version = "2.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastapi" },
+    { name = "jsonschema" },
     { name = "loguru" },
     { name = "mcp" },
     { name = "protobuf" },
@@ -585,7 +587,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=44" },
     { name = "fastapi", specifier = ">=0.128.8" },
+    { name = "jsonschema", specifier = ">=4.23" },
     { name = "loguru", specifier = "==0.7.3" },
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "protobuf", specifier = "==5.29.3" },

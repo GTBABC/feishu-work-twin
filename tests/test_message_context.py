@@ -56,8 +56,13 @@ class MessageContextTests(unittest.IsolatedAsyncioTestCase):
             received.extend(m["content"] for m in msg["_batch"])
             finished.set()
 
-        with patch.dict(
-            "os.environ", {"LARKX_BATCH_DELAY": "0.08", "LARKX_BATCH_MAX_WAIT": "0.5"}
+        with patch(
+            "larkx.agent.dispatcher.resolve_settings",
+            return_value=(
+                {"batch_delay": 0.08, "batch_max_wait": 0.5, "batch_size": 20},
+                {},
+                {},
+            ),
         ):
             worker = SessionWorker(
                 SimpleNamespace(backend=FakeBackend(), handle_message=handle), "g:"
@@ -80,8 +85,13 @@ class MessageContextTests(unittest.IsolatedAsyncioTestCase):
         async def handle(key, msg):
             finished.set()
 
-        with patch.dict(
-            "os.environ", {"LARKX_BATCH_DELAY": "0.1", "LARKX_BATCH_MAX_WAIT": "0.2"}
+        with patch(
+            "larkx.agent.dispatcher.resolve_settings",
+            return_value=(
+                {"batch_delay": 0.1, "batch_max_wait": 0.2, "batch_size": 20},
+                {},
+                {},
+            ),
         ):
             worker = SessionWorker(
                 SimpleNamespace(backend=FakeBackend(), handle_message=handle), "g:"
@@ -156,7 +166,11 @@ class MessageContextTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.hub.update_persona("group:g", {"group_reply_policy": "at_me"})
         dispatcher.cfg["triggers"] = {"group_at_only": True}
         dispatcher.handle_message = handle
-        with patch.dict("os.environ", {"LARKX_BATCH_DELAY": "0.05"}):
+        with patch.object(
+            self.runtime.hub,
+            "settings",
+            return_value={**self.runtime.hub.settings(), "batch_delay": 0.05},
+        ):
             await dispatcher.submit(
                 {
                     "chat_id": "g",

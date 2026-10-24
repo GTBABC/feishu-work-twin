@@ -173,7 +173,7 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 client.patch(
                     "/api/settings",
-                    json={"automation_enabled": "false"},
+                    json={"mark_read": "false"},
                     headers={"X-Workhub": "1"},
                 ).status_code,
                 400,

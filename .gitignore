@@ -47,5 +47,6 @@ work/
 *.db-wal
 credentials.json
 .larkx/
+/data/
 .pytest_cache/
 .ruff_cache/

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import uuid
 
@@ -8,6 +9,17 @@ from loguru import logger
 from ..config import DATA_DIR, load_config
 
 SESSIONS_PATH = DATA_DIR / 'agent_sessions.json'
+
+
+def hidden_process_options():
+    if os.name != 'nt':
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    # Some CLI redirectors forward STARTUPINFO to another executable. Hiding
+    # that child too avoids a console appearing despite CREATE_NO_WINDOW.
+    return {'creationflags': subprocess.CREATE_NO_WINDOW, 'startupinfo': startup}
 
 
 class AgentBackend:
@@ -75,6 +87,7 @@ class ClaudeCodeBackend(AgentBackend):
                 stdin=asyncio.subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **hidden_process_options(),
             )
             stdout, stderr = await proc.communicate(prompt.encode('utf-8'))
             out = stdout.decode('utf-8', errors='replace').strip()

@@ -184,13 +184,16 @@ class QrLogin:
         self.qr_content = json.dumps({"qrlogin": {"token": self.token}}, separators=(",", ":"))
         self.session.headers.update({"X-Flow-Key": self.flow_key})
 
+    def poll(self):
+        r = self.session.post(f"{self.region.accounts_origin}/accounts/qrlogin/polling", json={}, timeout=15)
+        data = r.json().get("data") or {}
+        return data
+
     def wait(self, timeout=180, interval=2, on_status=None):
         deadline = time.time() + timeout
         last = None
         while time.time() < deadline:
-            r = self.session.post(f"{self.region.accounts_origin}/accounts/qrlogin/polling", json={}, timeout=15)
-            j = r.json()
-            data = j.get("data") or {}
+            data = self.poll()
             step = data.get("next_step")
             status = (data.get("step_info") or {}).get("status")
             if status != last and on_status:

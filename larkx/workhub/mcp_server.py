@@ -10,11 +10,12 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 from pydantic import Field
+from ..settings import MESSAGE_MAX_CHARS
 
 Limit = Annotated[int, Field(ge=1, le=100)]
 Cursor = Annotated[int | None, Field(ge=1)]
 ChatId = Annotated[str, Field(min_length=1, max_length=40)]
-Text = Annotated[str, Field(min_length=1, max_length=12000)]
+Text = Annotated[str, Field(min_length=1, max_length=MESSAGE_MAX_CHARS)]
 RequestId = Annotated[str, Field(min_length=1, max_length=100)]
 
 
@@ -212,8 +213,10 @@ def create_mcp(access):
 
 
 def main():
+    from ..startup import effective
+
     parser = argparse.ArgumentParser(description="飞书工作数字人 MCP（stdio）")
-    parser.add_argument("--hub-url", default="http://127.0.0.1:8765")
+    parser.add_argument("--hub-url", default=f"http://127.0.0.1:{effective()['port']}")
     args = parser.parse_args()
     create_mcp(RemoteAccess(args.hub_url)).run()
 

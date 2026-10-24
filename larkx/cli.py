@@ -167,7 +167,9 @@ def cmd_send(args):
 
 def cmd_config(args):
     from .config import load_config
+    from sqlalchemy.engine import make_url
     cfg = load_config()
+    cfg['storage_url'] = make_url(cfg['storage_url']).render_as_string(hide_password=True)
     _print_json(cfg)
     return 0
 
@@ -329,7 +331,8 @@ async def _listen(args, auth):
     t = cfg.get('triggers') or {}
     print('─' * 56, flush=True)
     print(f"LarkAgentX 启动  region={auth.region.name}  user={auth.user_id}  device={auth.device_id[:12]}…", flush=True)
-    print(f"  存储: {cfg['storage_url']}", flush=True)
+    from sqlalchemy.engine import make_url
+    print(f"  存储: {make_url(cfg['storage_url']).render_as_string(hide_password=True)}", flush=True)
     print(f"  上下文边界: {cfg['context_scope']}  agent后端: {cfg['agent_backend']}{'  (已启用)' if cfg_agent else '  (未启用,仅入库)'}", flush=True)
     print(f"  触发前缀: {t.get('prefix') or '(全部消息)'}  自定义提示词: {'有' if cfg.get('system_prompt') else '无'}", flush=True)
     print('─' * 56, flush=True)
@@ -344,7 +347,9 @@ async def _listen(args, auth):
         async def image_prepare(msg):
             from .media import prepare_image, image_messages
             from .config import DATA_DIR
-            return [await asyncio.to_thread(prepare_image,auth,image,DATA_DIR/'images') for image in image_messages(msg)]
+            from .settings import resolve_settings
+            settings = runtime.hub.settings() if runtime else resolve_settings()[0]
+            return [await asyncio.to_thread(prepare_image,auth,image,DATA_DIR/'images') for image in image_messages(msg, settings['model_image_limit'])]
         if runtime:
             reply_fn = runtime.reply
         dispatcher = AgentDispatcher(backend, reply_fn, image_prepare=image_prepare,
@@ -381,7 +386,7 @@ async def _listen(args, auth):
             if is_own and sys.stderr.isatty():
                 line = f'[36m{line}[0m'
             logger.info(line)
-            if cfg.get('mark_read') and not is_own and msg.get('position'):
+            if (runtime.hub.settings()['mark_read'] if runtime else cfg.get('mark_read')) and not is_own and msg.get('position'):
                 await asyncio.to_thread(client.mark_read, chat_id, msg['position'], [msg['msg_id']])
             if dispatcher:
                 await dispatcher.submit(msg, chat_name=chat_name, sender_name=sender_name, my_user_id=auth.user_id)
@@ -474,8 +479,13 @@ def main():
     p.add_argument('--agent', action='store_true', help='接本地 coding agent 自动回复')
     p.set_defaults(fn=cmd_listen)
     p = sub.add_parser('web', help='启动本地工作数字人控制台')
-    p.add_argument('--port', type=int, default=8765)
+    p.add_argument('--port', type=int, default=None)
+    p.add_argument('--print-url', action='store_true', help='显示下次启动使用的本地地址')
     def cmd_web(args):
+        if args.print_url:
+            from .startup import effective
+            print(f"http://127.0.0.1:{args.port or effective()['port']}")
+            return 0
         from .workhub.server import run
         run(args.port)
         return 0

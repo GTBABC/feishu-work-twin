@@ -6,14 +6,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_home_env = os.environ.get("LARKX_HOME") or str(Path.home() / ".larkx")
-DATA_DIR = Path(os.path.expanduser(_home_env))
+from .startup import effective
+
+# Freeze startup settings for this process; a web save takes effect on restart.
+STARTUP = effective()
+DATA_DIR = Path(STARTUP["data_dir"])
 CREDENTIALS_PATH = DATA_DIR / "credentials.json"
 DB_DEFAULT_PATH = DATA_DIR / "messages.db"
 
 DEFAULTS = {
     "region": "feishu",
-    "storage_url": f"sqlite:///{DB_DEFAULT_PATH}",
+    "storage_url": STARTUP["storage_url"],
     "context_scope": "anchor",
     "agent_backend": "claude",
     "system_prompt": "",
@@ -57,7 +60,7 @@ def _as_bool(v: str):
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     for key in cfg:
-        if key == "triggers":
+        if key in ("triggers", "storage_url"):
             continue
         v = os.environ.get("LARKX_" + key.upper())
         if v:

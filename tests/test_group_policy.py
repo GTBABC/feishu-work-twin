@@ -21,12 +21,13 @@ class GroupPolicyTests(unittest.IsolatedAsyncioTestCase):
             "content": "进展？",
         }
 
-    def test_default_off_even_for_preexisting_auto_group(self):
+    def test_new_groups_inherit_default_off(self):
         self.assertFalse(
             self.dispatcher.should_handle(dict(self.msg, at_me=True, at_all=True), "me")
         )
         group = next(p for p in self.runtime.hub.personas() if p["kind"] == "group")
-        self.assertEqual(group["group_reply_policy"], "off")
+        self.assertEqual(group["group_reply_policy"], "inherit")
+        self.assertEqual(group["effective_group_reply_policy"], "off")
 
     def test_policy_matrix_and_private_unchanged(self):
         cases = [

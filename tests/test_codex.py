@@ -75,7 +75,14 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
 
         dispatcher = Dispatcher()
         finished = asyncio.Event()
-        with patch.dict("os.environ", {"LARKX_BATCH_DELAY": "0.01"}):
+        with patch(
+            "larkx.agent.dispatcher.resolve_settings",
+            return_value=(
+                {"batch_delay": 0.01, "batch_max_wait": 1, "batch_size": 20},
+                {},
+                {},
+            ),
+        ):
             worker = SessionWorker(dispatcher, "a")
             await worker.queue.put({"content": "第一条"})
             await worker.queue.put({"content": "第二条"})

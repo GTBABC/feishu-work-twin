@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
 from larkx.agent.codex_backend import CodexBackend, failure_reason
-from larkx.workhub.engine import obj, TEXT
 from tests import test_codex
 
 
@@ -89,46 +88,3 @@ class CodexFailureTests(unittest.IsolatedAsyncioTestCase):
                     await backend.run("chat", "question")
                 self.assertEqual(mocked.call_count, 1)
                 self.assertNotIn("private-secret", str(raised.exception))
-
-    async def test_structured_context_does_not_replay_snapshots_and_plain_history_is_bounded(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as folder:
-            with patch("larkx.agent.codex_backend.DATA_DIR", Path(folder)):
-                backend = CodexBackend()
-            history = [
-                {"role": "user", "content": "OLD_SNAPSHOT" + "x" * 40001},
-                {"role": "assistant", "content": "RECENT"},
-            ]
-            for key in ("structured", "plain"):
-                backend._path(key).write_text(json.dumps(history), encoding="utf-8")
-            inputs = []
-
-            async def spawn(*args, **kwargs):
-                output = Path(args[args.index("--output-last-message") + 1])
-
-                class Process:
-                    returncode = 0
-
-                    async def communicate(self, data):
-                        inputs.append(data.decode("utf-8"))
-                        output.write_text("OK", encoding="utf-8")
-                        return None, b""
-
-                return Process()
-
-            with patch("asyncio.create_subprocess_exec", spawn):
-                await backend.run(
-                    "structured", "FRESH_CONTEXT", response_schema=obj({"reply": TEXT})
-                )
-                await backend.run("plain", "FRESH_CONTEXT")
-            self.assertNotIn("OLD_SNAPSHOT", inputs[0])
-            self.assertNotIn("RECENT", inputs[0])
-            self.assertNotIn("OLD_SNAPSHOT", inputs[1])
-            self.assertIn("RECENT", inputs[1])
-            self.assertEqual(
-                len(
-                    json.loads(backend._path("structured").read_text(encoding="utf-8"))
-                ),
-                2,
-            )

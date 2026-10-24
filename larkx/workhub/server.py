@@ -1,6 +1,5 @@
 import asyncio
 import json
-import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -12,12 +11,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .runtime import HubRuntime
+from .updates import StateUpdates
+from ..agent.model_backend import ModelRouter
+from ..settings import (
+    GROUPS,
+    MESSAGE_MAX_CHARS,
+    message_limits,
+    settings_metadata,
+)
 
 STATIC = Path(__file__).parent / "static"
 
 
 class SendBody(BaseModel):
-    content: str = Field(min_length=1, max_length=12000)
+    content: str = Field(min_length=1, max_length=MESSAGE_MAX_CHARS)
     request_id: str = Field(min_length=1, max_length=100)
     anchor: str = Field(default="", max_length=40)
     reply_to_message_id: str = Field(default="", max_length=40)
@@ -29,19 +36,25 @@ class ControlBody(BaseModel):
 
 
 class DraftBody(BaseModel):
-    text: str = Field(default="", max_length=12000)
+    text: str = Field(default="", max_length=MESSAGE_MAX_CHARS)
     instruction: str = Field(default="", max_length=2000)
+
+
+class ClearDraftBody(BaseModel):
+    key: str = Field(max_length=64)
+    version: str = Field(max_length=80)
 
 
 class RichPart(BaseModel):
     type: Literal["text", "image"]
-    text: str = Field(default="", max_length=12000)
+    text: str = Field(default="", max_length=MESSAGE_MAX_CHARS)
     upload_id: str = Field(default="", max_length=40)
 
 
 class RichSendBody(BaseModel):
     parts: list[RichPart] = Field(min_length=1, max_length=30)
     request_id: str = Field(min_length=1, max_length=100)
+    anchor: str = Field(default="", max_length=40)
 
 
 class ImageUploadBody(BaseModel):
@@ -50,7 +63,11 @@ class ImageUploadBody(BaseModel):
 
 def create_app(runtime=None, start_bridge=True):
     from .mcp_server import HubAccess, create_mcp
+    from .login import BrowserLogin
+    from .path_picker import PathPicker
 
+    login = BrowserLogin()
+    picker = PathPicker()
     access = HubAccess(lambda: app.state.hub)
     mcp = create_mcp(access)
     mcp_app = mcp.streamable_http_app(json_response=True, stateless_http=True)
@@ -60,11 +77,15 @@ def create_app(runtime=None, start_bridge=True):
         app.state.hub = runtime or HubRuntime()
         if start_bridge:
             await app.state.hub.start()
+        app.state.updates = StateUpdates(app.state.hub)
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
             await app.state.hub.stop()
+            app.state.updates.close()
+            login.clear()
+            await picker.close()
 
     app = FastAPI(title="我的工作数字人", lifespan=lifespan)
     app.add_middleware(
@@ -121,17 +142,64 @@ def create_app(runtime=None, start_bridge=True):
 
     @app.get("/api/state")
     async def state(request: Request):
-        r = hub(request)
-        return {
-            "status": r.status(),
-            "tasks": r.hub.tasks(),
-            "conversations": r.hub.conversations(),
-            "personas": r.hub.personas(),
-            "actions": r.hub.actions(),
-        }
+        snapshot = request.app.state.updates.state()
+        return {**snapshot.data, "epoch": snapshot.epoch, "revision": snapshot.revision}
+
+    @app.get("/api/updates")
+    async def updates(
+        request: Request,
+        since: int = Query(default=0, ge=0),
+        epoch: str = Query(default="", max_length=64),
+        scope: Literal["all", "web"] = "all",
+    ):
+        source = request.app.state.updates
+        return (source.web_state() if scope == "web" else source.state()).delta(
+            since, epoch
+        )
+
+    @app.get("/api/lists/{collection}")
+    async def list_page(
+        request: Request,
+        collection: Literal["tasks", "conversations", "personas", "actions"],
+        query: str = Query(default="", max_length=200),
+        kind: str = Query(default="all", max_length=20),
+        status: str = Query(default="all", max_length=20),
+        start: str = Query(default="", max_length=10),
+        end: str = Query(default="", max_length=10),
+        page: int = Query(default=1, ge=1, le=10000000),
+        size: int = Query(default=10, ge=1, le=100),
+    ):
+        from .listing import page as select_page
+
+        snapshot = request.app.state.updates.web_state()
+        result = select_page(
+            hub(request).hub,
+            collection,
+            query=query,
+            kind=kind,
+            status=status,
+            start=start,
+            end=end,
+            number=page,
+            size=size,
+        )
+        return {**result, "revision": snapshot.data["status"]["list_revision"]}
 
     @app.get("/api/conversations/{chat_id}")
-    async def conversation(chat_id: str, request: Request):
+    async def conversation(
+        chat_id: str,
+        request: Request,
+        since: int | None = Query(default=None, ge=0),
+        epoch: str = Query(default="", max_length=64),
+    ):
+        snapshot = await request.app.state.updates.conversation(
+            chat_id, lambda: build_conversation(chat_id, request)
+        )
+        if since is not None:
+            return snapshot.delta(since, epoch)
+        return {**snapshot.data, "epoch": snapshot.epoch, "revision": snapshot.revision}
+
+    async def build_conversation(chat_id, request):
         r = hub(request)
         rows = r.hub.messages(chat_id)
         stale = [
@@ -176,11 +244,59 @@ def create_app(runtime=None, start_bridge=True):
             m["display_parts"] = display_parts(
                 m["msg_type"], json.loads(m.get("content_data") or "{}")
             )
+        from ..storage.models import Message
+
+        from sqlalchemy import and_, or_
+
+        earliest = rows[0] if rows else None
+        with r.storage.Session() as session:
+            more = (
+                earliest is not None
+                and session.query(Message.id)
+                .filter(
+                    Message.chat_id == chat_id,
+                    or_(
+                        Message.create_time < earliest["create_time"],
+                        and_(
+                            Message.create_time == earliest["create_time"],
+                            Message.id < earliest["id"],
+                        ),
+                    ),
+                )
+                .first()
+                is not None
+            )
         return {
             "context": r.hub.context(chat_id),
+            "draft": r.hub.reply_draft(chat_id) or {},
             "messages": rows,
             "memories": r.hub.memories(chat_id),
+            "history": {"next_before_id": earliest["id"] if more else None},
         }
+
+    @app.get("/api/conversations/{chat_id}/history")
+    async def conversation_history(
+        chat_id: str,
+        request: Request,
+        before_id: int = Query(ge=1),
+        limit: int = Query(default=50, ge=1, le=100),
+    ):
+        return hub(request).hub.find_messages(
+            chat_id=chat_id, before_id=before_id, limit=limit, chronological=True
+        )
+
+    @app.post("/api/conversations/{chat_id}/draft/clear")
+    async def clear_conversation_draft(
+        chat_id: str, body: ClearDraftBody, request: Request
+    ):
+        cleared = hub(request).hub.clear_reply_draft(chat_id, body.key, body.version)
+        if not cleared:
+            raise HTTPException(409, "草稿已更新，请刷新后重试")
+        return {"cleared": True}
+
+    @app.post("/api/actions/{action_id}/checked")
+    async def confirm_send_checked(action_id: int, request: Request):
+        return hub(request).hub.confirm_send_checked(action_id)
 
     @app.post("/api/conversations/{chat_id}/send")
     async def send(chat_id: str, body: SendBody, request: Request):
@@ -197,7 +313,7 @@ def create_app(runtime=None, start_bridge=True):
     @app.post("/api/conversations/{chat_id}/send-rich")
     async def send_rich(chat_id: str, body: RichSendBody, request: Request):
         return await hub(request).send_parts(
-            chat_id, [p.model_dump() for p in body.parts], body.request_id
+            chat_id, [p.model_dump() for p in body.parts], body.request_id, body.anchor
         )
 
     @app.post("/api/media/upload")
@@ -212,8 +328,9 @@ def create_app(runtime=None, start_bridge=True):
             raise ValueError("飞书尚未连接")
         try:
             data = base64.b64decode(body.data, validate=True)
-            if len(data) > 10 * 1024 * 1024:
-                raise ValueError("图片最多 10 MB")
+            maximum = r.hub.settings()["upload_max_mb"]
+            if len(data) > maximum * 1024 * 1024:
+                raise ValueError(f"图片最多 {maximum} MB")
             with Image.open(BytesIO(data)) as im:
                 width, height = im.size
                 fmt = im.format
@@ -247,6 +364,7 @@ def create_app(runtime=None, start_bridge=True):
                     "height": height,
                     "path": str(path),
                     "mime": Image.MIME[fmt],
+                    "size": len(data),
                 }
             ),
         )
@@ -380,7 +498,7 @@ def create_app(runtime=None, start_bridge=True):
     @app.post("/api/tasks/{task_id}/reply")
     async def task_reply(task_id: int, body: SendBody, request: Request):
         r = hub(request)
-        task = next((t for t in r.hub.tasks() if t["id"] == task_id), None)
+        task = r.hub.task(task_id)
         if not task:
             raise HTTPException(404, "任务不存在")
         return await r.send(
@@ -390,7 +508,7 @@ def create_app(runtime=None, start_bridge=True):
     @app.post("/api/tasks/{task_id}/polish")
     async def task_polish(task_id: int, body: DraftBody, request: Request):
         r = hub(request)
-        if not any(t["id"] == task_id for t in r.hub.tasks()):
+        if not r.hub.task(task_id):
             raise HTTPException(404, "任务不存在")
         payload = json.dumps(
             {"task_id": task_id, "text": body.text, "instruction": body.instruction},
@@ -403,68 +521,152 @@ def create_app(runtime=None, start_bridge=True):
         hub(request).hub.forget_memory(memory_id)
         return {"ok": True}
 
+    @app.get("/api/settings")
+    async def read_settings(request: Request):
+        r = hub(request)
+        values, defaults, sources = r.hub.settings_info()
+        from ..config import DATA_DIR, load_config
+        from sqlalchemy.engine import make_url
+
+        database = make_url(r.storage.url)
+        return {
+            "groups": GROUPS,
+            "fields": settings_metadata(),
+            "values": values,
+            "defaults": defaults,
+            "sources": sources,
+            "limits": message_limits(values),
+            "models": r.models.describe(),
+            "startup": startup_info(request),
+            "path_picker": picker.status(),
+            "connection": {
+                "飞书连接": r.connection,
+                "数据目录": str(DATA_DIR),
+                "存储类型": database.drivername,
+                "数据库": database.database or "内存数据库",
+                "服务地址": str(request.base_url).rstrip("/"),
+                "登录区域": getattr(
+                    getattr(getattr(r.client, "auth", None), "region", None),
+                    "name",
+                    load_config()["region"],
+                ),
+                "模型接入": ": ".join(r.models.active().values()),
+            },
+        }
+
+    def startup_info(request):
+        from ..config import DATA_DIR
+        from ..startup import describe
+
+        return describe(
+            {
+                "data_dir": str(DATA_DIR),
+                "storage_url": hub(request).storage.url,
+                "port": request.url.port or 80,
+            }
+        )
+
+    @app.put("/api/settings/startup")
+    async def save_startup(request: Request):
+        from ..startup import check, save
+
+        body = await request.json()
+        await asyncio.to_thread(check, body)
+        await asyncio.to_thread(save, body)
+        return startup_info(request)
+
+    @app.post("/api/settings/startup/reset")
+    async def reset_startup(request: Request):
+        from ..config import DATA_DIR
+        from ..startup import save
+
+        await asyncio.to_thread(
+            save,
+            {
+                "data_dir": str(DATA_DIR),
+                "storage_url": hub(request).storage.url,
+                "port": request.url.port or 80,
+            },
+        )
+        return startup_info(request)
+
+    @app.post("/api/settings/startup/check")
+    async def check_startup(request: Request):
+        from ..startup import check
+
+        body = await request.json()
+        return await asyncio.to_thread(check, body)
+
+    @app.post("/api/settings/path-picker")
+    async def pick_path(request: Request):
+        return await picker.pick(await request.json())
+
+    @app.post("/api/connection/reconnect")
+    async def reconnect(request: Request):
+        await hub(request).reconnect()
+        return {"ok": True}
+
+    @app.post("/api/connection/login")
+    async def start_login(request: Request):
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("登录参数格式无效")
+        return await login.start(body.get("region"), hub(request), body.get("id"))
+
+    @app.post("/api/connection/login/poll")
+    async def poll_login(request: Request):
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("登录参数格式无效")
+        return await login.poll(body.get("id"), hub(request))
+
+    @app.post("/api/connection/login/cancel")
+    async def cancel_login(request: Request):
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("登录参数格式无效")
+        async with login.lock:
+            if login.session and body.get("id") == login.id:
+                login.clear()
+        return {"ok": True}
+
     @app.patch("/api/settings")
     async def settings(request: Request):
-        fields = await request.json()
-        if not isinstance(fields, dict):
-            raise ValueError("设置格式无效")
-        if "own_rules" in fields and (
-            not isinstance(fields["own_rules"], str) or len(fields["own_rules"]) > 12000
-        ):
-            raise ValueError("数字人说明格式无效或过长")
-        if "automation_enabled" in fields and not isinstance(
-            fields["automation_enabled"], bool
-        ):
-            raise ValueError("自动回复开关必须是布尔值")
-        if "reply_suffix" in fields and (
-            not isinstance(fields["reply_suffix"], str)
-            or len(fields["reply_suffix"]) > 200
-        ):
-            raise ValueError("回复尾缀最多 200 字符")
         r = hub(request)
-        timing = r.hub.batch_timing()
-        for key, upper in (("batch_delay", 30), ("batch_max_wait", 60)):
-            if key in fields:
-                value = fields[key]
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(value)
-                    or not 0.1 <= value <= upper
-                ):
-                    raise ValueError(f"{key} 必须是 0.1 到 {upper} 秒之间的数字")
-                timing[key] = float(value)
-        if "human_pause_seconds" in fields:
-            value = fields["human_pause_seconds"]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or not 0 <= value <= 86400
-            ):
-                raise ValueError("人工接管等待时间必须是 0 到 86400 秒之间的数字")
-        if timing["batch_max_wait"] < timing["batch_delay"]:
-            raise ValueError("最长等待时间不能小于停顿时间")
-        if "own_rules" in fields:
-            if len(fields["own_rules"]) > 12000:
-                raise ValueError("数字人说明过长")
-            r.hub.set_setting("own_rules", fields["own_rules"])
-        if "automation_enabled" in fields:
-            r.hub.set_setting(
-                "automation_enabled",
-                "true" if fields["automation_enabled"] else "false",
-            )
-        if "reply_suffix" in fields:
-            suffix = fields["reply_suffix"]
-            if not isinstance(suffix, str) or len(suffix) > 200:
-                raise ValueError("回复尾缀最多 200 字符")
-            r.hub.set_setting("reply_suffix", suffix.strip())
-        for key in ("batch_delay", "batch_max_wait"):
-            if key in fields:
-                r.hub.set_setting(key, str(timing[key]))
-        if "human_pause_seconds" in fields:
-            r.hub.configure_human_pause(fields["human_pause_seconds"])
+        values = r.hub.update_settings(await request.json())
+        r.model_slots.configure(
+            values["max_concurrency"], values["background_concurrency"]
+        )
         return r.status()
+
+    @app.put("/api/models/connection")
+    async def save_model(request: Request):
+        r = hub(request)
+        r.models.save(await request.json())
+        return r.models.describe()
+
+    @app.post("/api/models/check")
+    async def check_model(request: Request):
+        r = hub(request)
+        return await ModelRouter(r.models).check(await request.json())
+
+    @app.post("/api/models/test")
+    async def test_model(request: Request):
+        r = hub(request)
+        body = await request.json()
+        try:
+            async with r.model_slots.slot():
+                return await ModelRouter(r.models).test(body, r.hub.settings())
+        except RuntimeError as error:
+            raise ValueError(str(error)) from None
+
+    @app.post("/api/models/list")
+    async def list_models(request: Request):
+        r = hub(request)
+        try:
+            return await ModelRouter(r.models).list_models(await request.json())
+        except RuntimeError as error:
+            raise ValueError(str(error)) from None
 
     @app.post("/api/control")
     async def control(body: ControlBody, request: Request):
@@ -488,7 +690,40 @@ def create_app(runtime=None, start_bridge=True):
     return app
 
 
-def run(port=8765):
+def run(port=None, *, stop_event=None):
     import uvicorn
+    from ..config import STARTUP
+    from ..startup import server_lock
 
-    uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="info")
+    port = STARTUP["port"] if port is None else port
+    with server_lock():
+        if stop_event is None:
+            uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="info")
+            return
+
+        import threading
+
+        server = uvicorn.Server(
+            uvicorn.Config(
+                create_app(),
+                host="127.0.0.1",
+                port=port,
+                log_level="info",
+                timeout_graceful_shutdown=20,
+            )
+        )
+        finished = threading.Event()
+
+        def watch_stop():
+            while not finished.wait(0.1):
+                if stop_event.is_set():
+                    server.should_exit = True
+                    return
+
+        monitor = threading.Thread(target=watch_stop, daemon=True)
+        monitor.start()
+        try:
+            server.run()
+        finally:
+            finished.set()
+            monitor.join(timeout=1)
