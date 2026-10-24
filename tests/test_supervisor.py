@@ -19,7 +19,7 @@ from larkx.workhub import supervisor as sup
 
 class SupervisorTests(unittest.TestCase):
     def setUp(self):
-        self.temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.temp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.folder = self.temp / "control"
         self.logs = self.temp / "logs"
 
@@ -259,6 +259,36 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(current["supervised"])
         self.assertEqual(current["state_file"], str(self.folder / "state.json"))
 
+    @unittest.skipUnless(os.name == "nt", "Windows short-path regression")
+    def test_short_path_alias_uses_the_same_control_file_and_process_identity(self):
+        import ctypes
+        from ctypes import wintypes
+
+        long_path = self.temp / "long directory name for runtime identity"
+        long_path.mkdir()
+        get_short_path = ctypes.WinDLL(
+            "kernel32", use_last_error=True
+        ).GetShortPathNameW
+        get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        get_short_path.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(4096)
+        if not get_short_path(str(long_path), buffer, len(buffer)):
+            self.skipTest("8.3 aliases unavailable on this filesystem")
+        short_path = Path(buffer.value)
+        if str(short_path).casefold() == str(long_path).casefold():
+            self.skipTest("8.3 aliases disabled on this filesystem")
+        with patch.dict(
+            os.environ, {"LARKX_STARTUP_PATH": str(short_path / "startup.json")}
+        ):
+            folder = long_path / "workhub-supervisor"
+            self.assertEqual(sup.control_dir(), folder)
+            with sup.supervisor_lock(folder):
+                sup.write_state(folder, self.live_record())
+                current = sup.status(short_path / "workhub-supervisor")
+                self.assertEqual(current["pid"], os.getpid())
+                self.assertTrue(current["supervised"])
+                self.assertEqual(current["state_file"], str(folder / "state.json"))
+
     def test_recycled_pid_is_not_reported_or_targeted_for_stop(self):
         with sup.supervisor_lock(self.folder):
             sup.write_state(
@@ -366,7 +396,8 @@ class SupervisorTests(unittest.TestCase):
             "u.IsWindowVisible.argtypes=[wintypes.HWND]; "
             "w=k.GetConsoleWindow(); print(int(bool(w and u.IsWindowVisible(w))))"
         )
-        script = self.temp / "cli.cmd"
+        script = self.temp / "CLI wrapper with spaces" / "cli.cmd"
+        script.parent.mkdir()
         script.write_text(f'@echo off\n"{sys.executable}" -c "{code}"\n')
         for args in ([sys.executable, "-c", code], [str(script)]):
             with self.subTest(args=args):
@@ -378,6 +409,32 @@ class SupervisorTests(unittest.TestCase):
         with patch.object(sup.sys, "executable", str(self.temp / "python.exe")):
             with self.assertRaisesRegex(RuntimeError, "pythonw.exe"):
                 sup.background_executable()
+
+    @unittest.skipUnless(os.name == "nt", "Windows cmd argument regression")
+    def test_cmd_wrapper_preserves_spaced_arguments_and_private_stdin(self):
+        from larkx.agent.model_backend import communicate
+
+        script = self.temp / "CLI wrapper with spaces" / "fixture.cmd"
+        script.parent.mkdir()
+        code = "import json,sys; print(json.dumps({'argument':sys.argv[1],'config':sys.argv[2],'input':sys.stdin.read()}))"
+        script.write_text(f'@echo off\n"{sys.executable}" -c "{code}" %*\n')
+        private = 'private input: %PATH% & "quoted" <fixture>\n'
+        output = asyncio.run(
+            communicate(
+                [str(script), "model name with spaces", '{"mcpServers":{}}'],
+                private,
+                str(self.temp),
+                10,
+            )
+        )
+        self.assertEqual(
+            json.loads(output),
+            {
+                "argument": "model name with spaces",
+                "config": '{"mcpServers":{}}',
+                "input": private,
+            },
+        )
 
     @unittest.skipUnless(os.name == "nt", "Windows console regression")
     def test_old_guard_requires_manual_restart(self):
@@ -420,7 +477,7 @@ class SupervisorIntegrationTests(unittest.TestCase):
         # Reproduce separate AppData views with an isolated program installation.
         # No explicit startup override is used, so this exercises the real default.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             program = root / "program"
             elsewhere = root / "elsewhere"
             elsewhere.mkdir()
@@ -490,7 +547,7 @@ class SupervisorIntegrationTests(unittest.TestCase):
     def test_detached_start_real_worker_crash_recovery_and_stop(self):
         # Isolated credentials/database: no live Feishu account or message is touched.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             repo = Path(__file__).resolve().parents[1]
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))

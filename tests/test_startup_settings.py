@@ -27,7 +27,7 @@ from tests.test_hub import FakeBackend
 
 class StartupSettingsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.temp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.config = self.temp / "bootstrap" / "startup.json"
         self.enterContext(
             patch.dict(

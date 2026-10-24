@@ -6,7 +6,6 @@ import json
 import mimetypes
 import os
 import signal
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -302,12 +301,15 @@ async def communicate(args, text, cwd, timeout, env=None):
         # stay on stdin or in a temporary file. Reject shell metacharacters.
         if any(any(c in arg for c in "&|<>^%!\r\n") for arg in args):
             raise RuntimeError("此 Windows CLI 启动参数需要原生可执行程序")
+        # Keep arguments separate. CALL preserves a quoted script path instead
+        # of passing an already-quoted command through another quoting layer.
         args = [
             os.environ.get("COMSPEC", "cmd.exe"),
             "/d",
             "/s",
             "/c",
-            subprocess.list2cmdline(args),
+            "call",
+            *args,
         ]
     process = await asyncio.create_subprocess_exec(
         *args,
